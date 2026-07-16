@@ -1,0 +1,20 @@
+services:
+  idempotencia-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: idempotencia-backend:latest
+    container_name: idempotencia-backend
+    restart: unless-stopped
+    environment:
+      ConnectionStrings__DefaultConnection: "Server=idempotencia-sqlserver,1433;Database=Idempotencia;User Id=sa;Password=${DB_SA_PASSWORD};TrustServerCertificate=True;"
+    ports:
+      - "5555:80"
+    networks:
+      - red-proxy
+    depends_on:
+      - idempotencia-sqlserver
+
+networks:
+  red-proxy:
+    external: true
