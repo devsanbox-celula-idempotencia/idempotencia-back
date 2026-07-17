@@ -5,6 +5,7 @@ using idempotencia.Middleware;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace idempotencia.Controllers;
 
@@ -24,6 +25,7 @@ public class AuthController : ControllerBase
     /// <summary>Registro por contraseña. Devuelve un JWT.</summary>
     [HttpPost("register")]
     [AllowAnonymous]
+    [EnableRateLimiting("auth")]
     public async Task<ActionResult<AuthResponse>> Register(
         [FromBody] RegisterRequest request, CancellationToken ct)
     {
@@ -34,6 +36,7 @@ public class AuthController : ControllerBase
     /// <summary>Login por contraseña. Devuelve un JWT.</summary>
     [HttpPost("login")]
     [AllowAnonymous]
+    [EnableRateLimiting("auth")]
     public async Task<ActionResult<AuthResponse>> Login(
         [FromBody] LoginRequest request, CancellationToken ct)
     {
