@@ -3,6 +3,7 @@ using System.Threading.RateLimiting;
 using idempotencia.Data;
 using idempotencia.Interfaces;
 using idempotencia.Middleware;
+using idempotencia.Provisioners;
 using idempotencia.Repository;
 using idempotencia.Services;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -33,6 +34,16 @@ builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<IDatabaseRepository, DatabaseRepository>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
+
+// Aprovisionamiento multi-motor: servicio orquestador + factory + un provisioner
+// por motor (patrón Strategy). Se registran todos como IDatabaseProvisioner y el
+// factory elige el correcto según el motor pedido.
+builder.Services.AddScoped<IDatabaseProvisioningService, DatabaseProvisioningService>();
+builder.Services.AddScoped<IDatabaseProvisionerFactory, DatabaseProvisionerFactory>();
+builder.Services.AddScoped<IDatabaseProvisioner, SqlServerProvisioner>();
+builder.Services.AddScoped<IDatabaseProvisioner, PostgresProvisioner>();
+builder.Services.AddScoped<IDatabaseProvisioner, MySqlProvisioner>();
+builder.Services.AddScoped<IDatabaseProvisioner, MongoProvisioner>();
 
 
 builder.Services.AddAuthentication(options =>

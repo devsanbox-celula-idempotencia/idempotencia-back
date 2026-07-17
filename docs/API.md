@@ -152,25 +152,38 @@ POST /databases
 **Body:**
 ```json
 {
+  "engine": "SqlServer",
   "dbName": "proyecto_ana"
 }
 ```
+
+- `engine`: **requerido**. Valores: `"SqlServer"`, `"Postgres"`, `"MySql"`, `"Mongo"`.
+  Hoy solo `"SqlServer"` está implementado; los demás devuelven `501`.
+- `dbName`: requerido, máx. 128 (el backend le antepone un prefijo por usuario).
 
 **Respuesta `201 Created`:**
 ```json
 {
   "databaseId": 5,
-  "dbName": "proyecto_ana",
+  "engine": "SqlServer",
+  "dbName": "colmena_u12_proyecto_ana",
   "status": "Active",
   "maxStorageMB": 20,
-  "loginName": "usr_proyecto_ana",
-  "password": "P@ssGeneradaUnaVez"
+  "host": "46.224.101.88",
+  "port": 1433,
+  "loginName": "usr_colmena_u12_proyecto_ana",
+  "password": "P4ssGeneradaUnaVez"
 }
 ```
 
 > ⚠️ El campo `password` son las credenciales de acceso a la BD y **solo se
 > devuelven en esta respuesta**. El front debe mostrárselas al usuario en ese
 > momento (no se pueden recuperar después).
+
+**Errores comunes:**
+- `400` → `engine` no soportado o `dbName` inválido.
+- `401` → token ausente/inválido.
+- `501` → el motor pedido aún no está implementado (`Postgres`/`MySql`/`Mongo`).
 
 ### 5.2 Listar mis bases de datos
 
@@ -183,7 +196,8 @@ GET /databases
 [
   {
     "databaseId": 5,
-    "dbName": "proyecto_ana",
+    "engine": "SqlServer",
+    "dbName": "colmena_u12_proyecto_ana",
     "status": "Active",
     "maxStorageMB": 20,
     "currentSizeMB": 3.5,
