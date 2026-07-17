@@ -81,6 +81,24 @@ builder.Services.AddAuthorization();
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 
+// ---------------------------------------------------------------------------
+// CORS: orígenes permitidos del frontend (pruebas locales y despliegue).
+// Los orígenes no llevan barra final; el navegador compara el Origin exacto.
+// ---------------------------------------------------------------------------
+const string FrontendCorsPolicy = "FrontendCors";
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy(FrontendCorsPolicy, policy =>
+    {
+        policy.WithOrigins(
+                "http://localhost:5555",       // front en pruebas (HTTP)
+                "https://localhost:5555",       // front en pruebas (HTTPS, por si aplica)
+                "https://idempotencia.andrescortes.dev") // despliegue
+            .AllowAnyHeader()
+            .AllowAnyMethod();
+    });
+});
+
 var app = builder.Build();
 
 
@@ -93,6 +111,9 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+
+// CORS debe ir antes de autenticación/autorización.
+app.UseCors(FrontendCorsPolicy);
 
 app.UseAuthentication();
 app.UseAuthorization();
