@@ -10,124 +10,90 @@ using Microsoft.AspNetCore.RateLimiting;
 namespace idempotencia.Controllers;
 
 /// <summary>
-/// Endpoints de autenticación: registro/login por contraseña y flujos OAuth
-/// (challenge/callback) de Google y GitHub. El controller es un mediador: no
-/// contiene reglas de negocio, solo delega en <see cref="IAuthService"/>.
+/// Autenticación: registro/login por contraseña y flujos OAuth de Google y
+/// GitHub. Es un mediador; delega en <see cref="IAuthService"/> y no contiene
+/// reglas de negocio.
 /// </summary>
 [ApiController]
 [Route("auth")]
 public class AuthController : ControllerBase
 {
     private readonly IAuthService _auth;
+    private readonly IOAuthRedirectBuilder _redirect;
 
-    public AuthController(IAuthService auth) => _auth = auth;
+    public AuthController(IAuthService auth, IOAuthRedirectBuilder redirect)
+    {
+        _auth = auth;
+        _redirect = redirect;
+    }
 
-    /// <summary>Registro por contraseña. Devuelve un JWT.</summary>
     [HttpPost("register")]
     [AllowAnonymous]
     [EnableRateLimiting("auth")]
     public async Task<ActionResult<AuthResponse>> Register(
         [FromBody] RegisterRequest request, CancellationToken ct)
     {
-        var response = await _auth.RegisterAsync(request, ct);
-        return Ok(response);
+        return Ok(await _auth.RegisterAsync(request, ct));
     }
 
-    /// <summary>Login por contraseña. Devuelve un JWT.</summary>
     [HttpPost("login")]
     [AllowAnonymous]
     [EnableRateLimiting("auth")]
     public async Task<ActionResult<AuthResponse>> Login(
         [FromBody] LoginRequest request, CancellationToken ct)
     {
-        var response = await _auth.LoginAsync(request, ct);
-        return Ok(response);
+        return Ok(await _auth.LoginAsync(request, ct));
     }
 
-    // ---------------------------------------------------------------------
-    // OAuth: Google
-    // ---------------------------------------------------------------------
-
-    /// <summary>
-    /// Inicia el flujo OAuth de Google. Redirige al proveedor y, tras el
-    /// consentimiento, vuelve al callback.
-    /// </summary>
     [HttpGet("google/login")]
     [AllowAnonymous]
-    public IActionResult GoogleLogin()
-    {
-        var props = new AuthenticationProperties
-        {
-            RedirectUri = Url.Action(nameof(GoogleCallback))
-        };
-        return Challenge(props, "Google");
-    }
+    public IActionResult GoogleLogin() => Challenge(
+        new AuthenticationProperties { RedirectUri = Url.Action(nameof(GoogleCallback)) }, "Google");
 
-    /// <summary>Callback de Google: resuelve la identidad y firma el JWT.</summary>
     [HttpGet("google/callback")]
     [AllowAnonymous]
-    public async Task<ActionResult<AuthResponse>> GoogleCallback(CancellationToken ct)
-    {
-        var response = await HandleExternalCallbackAsync("Google", ct);
-        return Ok(response);
-    }
+    public Task<IActionResult> GoogleCallback(CancellationToken ct) => ExternalCallback("Google", ct);
 
-    // ---------------------------------------------------------------------
-    // OAuth: GitHub
-    // ---------------------------------------------------------------------
-
-    /// <summary>Inicia el flujo OAuth de GitHub.</summary>
     [HttpGet("github/login")]
     [AllowAnonymous]
-    public IActionResult GitHubLogin()
-    {
-        var props = new AuthenticationProperties
-        {
-            RedirectUri = Url.Action(nameof(GitHubCallback))
-        };
-        return Challenge(props, "GitHub");
-    }
+    public IActionResult GitHubLogin() => Challenge(
+        new AuthenticationProperties { RedirectUri = Url.Action(nameof(GitHubCallback)) }, "GitHub");
 
-    /// <summary>Callback de GitHub: resuelve la identidad y firma el JWT.</summary>
     [HttpGet("github/callback")]
     [AllowAnonymous]
-    public async Task<ActionResult<AuthResponse>> GitHubCallback(CancellationToken ct)
+    public Task<IActionResult> GitHubCallback(CancellationToken ct) => ExternalCallback("GitHub", ct);
+
+    // Resuelve la identidad externa y redirige al frontend con la sesión o el error.
+    private async Task<IActionResult> ExternalCallback(string provider, CancellationToken ct)
     {
-        var response = await HandleExternalCallbackAsync("GitHub", ct);
-        return Ok(response);
+        try
+        {
+            var response = await ResolveExternalLoginAsync(provider, ct);
+            return Redirect(_redirect.BuildSuccess(response));
+        }
+        catch (Exception ex)
+        {
+            var (_, message) = ApiExceptionMapper.Map(ex);
+            return Redirect(_redirect.BuildError(message));
+        }
     }
 
-    // ---------------------------------------------------------------------
-    // Lógica común de callback OAuth
-    // ---------------------------------------------------------------------
-
-    /// <summary>
-    /// Lee el resultado de la autenticación externa (cookie temporal "External"),
-    /// extrae Provider + ProviderUserId + Email + FullName y delega en el
-    /// servicio de autenticación, que invoca <c>sp_UpsertExternalLogin</c>.
-    /// </summary>
-    private async Task<AuthResponse> HandleExternalCallbackAsync(string provider, CancellationToken ct)
+    // Lee la cookie temporal "External", extrae los datos del proveedor y delega
+    // en el servicio, que invoca sp_UpsertExternalLogin.
+    private async Task<AuthResponse> ResolveExternalLoginAsync(string provider, CancellationToken ct)
     {
-        // El SignInScheme de los handlers OAuth es la cookie "External".
         var result = await HttpContext.AuthenticateAsync("External");
-
         if (!result.Succeeded || result.Principal is null)
             throw new AuthException("No se pudo completar la autenticación externa.");
 
         var principal = result.Principal;
-
         var providerUserId = principal.FindFirstValue(ClaimTypes.NameIdentifier);
         var email = principal.FindFirstValue(ClaimTypes.Email);
         var fullName = principal.FindFirstValue(ClaimTypes.Name) ?? email ?? string.Empty;
 
-        // GitHub puede devolver el email como privado; el handler intenta
-        // resolverlo con el scope "user:email" (ver Program.cs). Si aún así
-        // no llega, no podemos vincular la cuenta de forma fiable.
         if (string.IsNullOrEmpty(providerUserId) || string.IsNullOrEmpty(email))
-            throw new AuthException(
-                "El proveedor externo no entregó los datos mínimos (id/email).");
+            throw new AuthException("El proveedor externo no entregó los datos mínimos (id/email).");
 
-        // Se limpia la cookie temporal una vez extraídos los datos.
         await HttpContext.SignOutAsync("External");
 
         return await _auth.ExternalLoginAsync(provider, providerUserId, email, fullName, ct);
