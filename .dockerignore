@@ -6,7 +6,7 @@ publish/
 .vs/
 .vscode/
 **/*.user
-Dockerfile
+
 .dockerignore
 .gitignore
 README.md
