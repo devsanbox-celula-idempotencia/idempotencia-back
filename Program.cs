@@ -1,4 +1,5 @@
 using System.Text;
+using System.Threading.RateLimiting;
 using idempotencia.Data;
 using idempotencia.Interfaces;
 using idempotencia.Middleware;
@@ -6,6 +7,7 @@ using idempotencia.Repository;
 using idempotencia.Services;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Scalar.AspNetCore;
@@ -99,6 +101,59 @@ builder.Services.AddCors(options =>
     });
 });
 
+// ---------------------------------------------------------------------------
+// Rate limiting (nativo de .NET). Protege contra abuso/fuerza bruta.
+//   - Política "auth": estricta, para login/registro (por IP).
+//   - GlobalLimiter: límite general de seguridad por IP para toda la API.
+// La partición usa la IP remota; detrás de un proxy inverso (despliegue) hay
+// que habilitar ForwardedHeaders para que la IP real llegue correctamente.
+// ---------------------------------------------------------------------------
+const string AuthRateLimitPolicy = "auth";
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    // Política estricta para endpoints de autenticación: 10 intentos/min por IP.
+    options.AddPolicy(AuthRateLimitPolicy, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0 // sin cola: al superar el límite, se rechaza de una
+            }));
+
+    // Límite global por IP para el resto de la API: 100 peticiones/min.
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 100,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+
+    // Respuesta uniforme al rechazar (mismo formato {status,error} que el resto).
+    options.OnRejected = async (context, token) =>
+    {
+        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+
+        // Informa al cliente cuántos segundos esperar, si el límite lo expone.
+        if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+        {
+            context.HttpContext.Response.Headers.RetryAfter =
+                ((int)retryAfter.TotalSeconds).ToString();
+        }
+
+        context.HttpContext.Response.ContentType = "application/json";
+        await context.HttpContext.Response.WriteAsync(
+            "{\"status\":429,\"error\":\"Demasiadas solicitudes. Inténtalo más tarde.\"}",
+            token);
+    };
+});
+
 var app = builder.Build();
 
 
@@ -114,6 +169,9 @@ app.UseHttpsRedirection();
 
 // CORS debe ir antes de autenticación/autorización.
 app.UseCors(FrontendCorsPolicy);
+
+// Rate limiter: aplica el límite global y habilita las políticas nombradas.
+app.UseRateLimiter();
 
 app.UseAuthentication();
 app.UseAuthorization();
