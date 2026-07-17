@@ -29,6 +29,7 @@ publish/
 # ---- Configuración local / secretos ----
 appsettings.Development.json
 appsettings.*.Local.json
+appsettings.json
 *.local.json
 secrets.json
 .env
