@@ -1,0 +1,53 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Port knocking + Deploy a la VPS
+        run: |
+          set -e
+
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          echo "[+] Golpeando puertos para abrir acceso..."
+          for port in ${{ secrets.KNOCK_PORTS_OPEN }}; do
+            timeout 1 bash -c "echo > /dev/tcp/${{ secrets.VPS_HOST }}/$port" 2>/dev/null || true
+            sleep 0.15
+          done
+          echo "[+] Puerto 22 abierto temporalmente."
+          sleep 2
+
+          cat >> ~/.ssh/config <<EOF
+          Host vps
+            HostName ${{ secrets.VPS_HOST }}
+            User devop
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+          EOF
+
+          echo "[+] Conectando por SSH y desplegando..."
+          ssh vps << 'ENDSSH'
+            set -e
+            cd /home/devop/idempotencia-back
+            echo "Actualizando repositorio..."
+            git pull origin main
+            echo "Reconstruyendo contenedor..."
+            docker compose down
+            docker compose up -d --build
+            echo "Despliegue completado."
+          ENDSSH
+
+          echo "[+] Cerrando puerto 22..."
+          for port in ${{ secrets.KNOCK_PORTS_CLOSE }}; do
+            timeout 1 bash -c "echo > /dev/tcp/${{ secrets.VPS_HOST }}/$port" 2>/dev/null || true
+            sleep 0.1
+          done
+          echo "[+] Puerto 22 cerrado."
