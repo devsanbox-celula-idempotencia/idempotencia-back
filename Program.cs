@@ -3,6 +3,7 @@ using System.Threading.RateLimiting;
 using idempotencia.Data;
 using idempotencia.Interfaces;
 using idempotencia.Middleware;
+using idempotencia.OpenApi;
 using idempotencia.Provisioners;
 using idempotencia.Repository;
 using idempotencia.Services;
@@ -96,7 +97,8 @@ builder.Services.AddAuthentication(options =>
 
 builder.Services.AddAuthorization();
 builder.Services.AddControllers();
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options =>
+    options.AddDocumentTransformer<BearerSecuritySchemeTransformer>());
 
 // ---------------------------------------------------------------------------
 // CORS: orígenes permitidos del frontend (pruebas locales y despliegue).
@@ -177,6 +179,8 @@ app.UseMiddleware<ExceptionHandlingMiddleware>();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    // Swagger UI sobre el documento OpenAPI generado, disponible en /swagger.
+    app.UseSwaggerUI(options => options.SwaggerEndpoint("/openapi/v1.json", "Colmena API"));
     app.MapScalarApiReference();
 }
 
