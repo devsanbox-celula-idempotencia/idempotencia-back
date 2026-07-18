@@ -3,7 +3,7 @@ name: Deploy
 on:
   push:
     branches:
-      - main
+      - QA
 
 jobs:
   deploy:
@@ -36,7 +36,7 @@ jobs:
           echo "[+] Conectando por SSH y desplegando..."
           ssh vps << 'ENDSSH'
             set -e
-            cd /home/devop/idempotencia-back
+            cd /home/devop/idempotencia-back-QA/idempotencia-qa-back
             echo "Actualizando repositorio..."
             git pull origin main
             echo "Reconstruyendo contenedor..."
