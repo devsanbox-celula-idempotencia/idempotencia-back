@@ -1,19 +1,26 @@
 services:
-  idempotencia-backend:
+  idempotencia-qa-back:
     build:
       context: .
       dockerfile: Dockerfile
-    image: idempotencia-backend:latest
-    container_name: idempotencia-backend
+    image: idempotencia-qa-back:latest
+    env_file:
+      - .env
+    container_name: idempotencia-qa-back
     restart: unless-stopped
-    environment:
-      ConnectionStrings__DefaultConnection: "Server=idempotencia-sqlserver,1433;Database=Idempotencia;User Id=sa;Password=${DB_SA_PASSWORD};TrustServerCertificate=True;"
+    volumes:
+      - ./appsettings.json:/app/appsettings.json:ro
     ports:
-      - "5555:80"
+      - "5556:5556"
     networks:
       - red-proxy
-    depends_on:
-      - idempotencia-sqlserver
+    mem_limit: 384m
+    cpus: 0.3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   red-proxy:
