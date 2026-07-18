@@ -3,6 +3,8 @@ using System.Threading.RateLimiting;
 using idempotencia.Data;
 using idempotencia.Interfaces;
 using idempotencia.Middleware;
+using idempotencia.OpenApi;
+using idempotencia.Provisioners;
 using idempotencia.Repository;
 using idempotencia.Services;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -24,6 +26,9 @@ var jwtSettings = builder.Configuration
     .GetSection(JwtSettings.SectionName)
     .Get<JwtSettings>() ?? new JwtSettings();
 
+builder.Services.Configure<FrontendSettings>(
+    builder.Configuration.GetSection(FrontendSettings.SectionName));
+
 
 builder.Services.AddDbContext<ColmenaDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("Colmena")));
@@ -33,6 +38,17 @@ builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<IDatabaseRepository, DatabaseRepository>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
+builder.Services.AddSingleton<IOAuthRedirectBuilder, OAuthRedirectBuilder>();
+
+// Aprovisionamiento multi-motor: servicio orquestador + factory + un provisioner
+// por motor (patrón Strategy). Se registran todos como IDatabaseProvisioner y el
+// factory elige el correcto según el motor pedido.
+builder.Services.AddScoped<IDatabaseProvisioningService, DatabaseProvisioningService>();
+builder.Services.AddScoped<IDatabaseProvisionerFactory, DatabaseProvisionerFactory>();
+builder.Services.AddScoped<IDatabaseProvisioner, SqlServerProvisioner>();
+builder.Services.AddScoped<IDatabaseProvisioner, PostgresProvisioner>();
+builder.Services.AddScoped<IDatabaseProvisioner, MySqlProvisioner>();
+builder.Services.AddScoped<IDatabaseProvisioner, MongoProvisioner>();
 
 
 builder.Services.AddAuthentication(options =>
@@ -81,7 +97,8 @@ builder.Services.AddAuthentication(options =>
 
 builder.Services.AddAuthorization();
 builder.Services.AddControllers();
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options =>
+    options.AddDocumentTransformer<BearerSecuritySchemeTransformer>());
 
 // ---------------------------------------------------------------------------
 // CORS: orígenes permitidos del frontend (pruebas locales y despliegue).
@@ -162,6 +179,8 @@ app.UseMiddleware<ExceptionHandlingMiddleware>();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    // Swagger UI sobre el documento OpenAPI generado, disponible en /swagger.
+    app.UseSwaggerUI(options => options.SwaggerEndpoint("/openapi/v1.json", "Colmena API"));
     app.MapScalarApiReference();
 }
 

@@ -10,38 +10,35 @@ namespace idempotencia.Controllers;
 
 /// <summary>
 /// Endpoints de bases de datos aprovisionadas del usuario autenticado.
-/// Todo requiere JWT válido. El controller solo media hacia el repositorio,
-/// que invoca los SPs; las validaciones (cuota, límites) viven en el SP.
+/// Todo requiere JWT válido. El controller media hacia el servicio de
+/// aprovisionamiento (que orquesta SP de control + provisioner del motor) y
+/// hacia el repositorio para las lecturas.
 /// </summary>
 [ApiController]
 [Route("databases")]
 [Authorize]
 public class DatabasesController : ControllerBase
 {
+    private readonly IDatabaseProvisioningService _provisioning;
     private readonly IDatabaseRepository _databases;
 
-    public DatabasesController(IDatabaseRepository databases) => _databases = databases;
+    public DatabasesController(
+        IDatabaseProvisioningService provisioning, IDatabaseRepository databases)
+    {
+        _provisioning = provisioning;
+        _databases = databases;
+    }
 
-    /// <summary>Crea (aprovisiona) una BD para el usuario autenticado.</summary>
+    /// <summary>Crea (aprovisiona) una BD del motor indicado para el usuario autenticado.</summary>
     [HttpPost]
     public async Task<ActionResult<CreateDatabaseResponse>> Create(
         [FromBody] CreateDatabaseRequest request, CancellationToken ct)
     {
         var userId = GetUserId();
 
-        var result = await _databases.CreateDatabaseAsync(userId, request.DbName, ct);
+        var response = await _provisioning.ProvisionAsync(userId, request.Engine, request.DbName, ct);
 
-        var response = new CreateDatabaseResponse
-        {
-            DatabaseId = result.DatabaseId,
-            DbName = result.DbName,
-            Status = result.Status,
-            MaxStorageMB = result.MaxStorageMB,
-            LoginName = result.LoginName,
-            Password = result.Password
-        };
-
-        return CreatedAtAction(nameof(GetMine), new { id = result.DatabaseId }, response);
+        return CreatedAtAction(nameof(GetMine), new { id = response.DatabaseId }, response);
     }
 
     /// <summary>Lista las BDs del usuario autenticado.</summary>
@@ -68,6 +65,7 @@ public class DatabasesController : ControllerBase
     private static DatabaseResponse MapToResponse(ProvisionedDatabaseInfo info) => new()
     {
         DatabaseId = info.DatabaseId,
+        Engine = info.Engine,
         DbName = info.DbName,
         Status = info.Status,
         MaxStorageMB = info.MaxStorageMB,

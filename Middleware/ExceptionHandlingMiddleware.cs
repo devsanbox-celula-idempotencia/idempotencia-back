@@ -4,8 +4,8 @@ using Microsoft.Data.SqlClient;
 namespace idempotencia.Middleware;
 
 /// <summary>
-/// Middleware central de manejo de errores. Traduce excepciones a respuestas
-/// JSON uniformes (ProblemDetails-like) y evita filtrar detalles internos.
+/// Middleware central de manejo de errores. Registra la excepción y responde en
+/// JSON uniforme, delegando el mapeo a <see cref="ApiExceptionMapper"/>.
 /// </summary>
 public class ExceptionHandlingMiddleware
 {
@@ -24,31 +24,26 @@ public class ExceptionHandlingMiddleware
         {
             await _next(context);
         }
-        catch (AppException ex)
-        {
-            // Errores esperados del dominio/autenticación.
-            await WriteProblemAsync(context, ex.StatusCode, ex.Message);
-        }
-        catch (SqlException ex)
-        {
-            // Errores lanzados por los Stored Procedures (THROW/RAISERROR).
-            // Los errores >= 50000 suelen ser validaciones de negocio del SP.
-            _logger.LogWarning(ex, "Error de SQL Server al ejecutar un SP.");
-            var status = ex.Number >= 50000
-                ? StatusCodes.Status400BadRequest
-                : StatusCodes.Status500InternalServerError;
-            var message = status == StatusCodes.Status400BadRequest
-                ? ex.Message
-                : "Ocurrió un error al procesar la solicitud.";
-            await WriteProblemAsync(context, status, message);
-        }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error no controlado.");
-            await WriteProblemAsync(
-                context,
-                StatusCodes.Status500InternalServerError,
-                "Ocurrió un error inesperado.");
+            Log(ex);
+            var (statusCode, message) = ApiExceptionMapper.Map(ex);
+            await WriteProblemAsync(context, statusCode, message);
+        }
+    }
+
+    private void Log(Exception ex)
+    {
+        switch (ex)
+        {
+            case AppException:
+                break; // error esperado del dominio: no se registra como fallo
+            case SqlException:
+                _logger.LogWarning(ex, "Error de SQL Server al ejecutar un SP.");
+                break;
+            default:
+                _logger.LogError(ex, "Error no controlado.");
+                break;
         }
     }
 
@@ -61,12 +56,7 @@ public class ExceptionHandlingMiddleware
         context.Response.StatusCode = statusCode;
         context.Response.ContentType = "application/json";
 
-        var payload = JsonSerializer.Serialize(new
-        {
-            status = statusCode,
-            error = message
-        });
-
+        var payload = JsonSerializer.Serialize(new { status = statusCode, error = message });
         await context.Response.WriteAsync(payload);
     }
 }
