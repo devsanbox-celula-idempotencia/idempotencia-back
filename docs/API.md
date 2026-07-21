@@ -122,7 +122,7 @@ navegador** a los endpoints de inicio:
 3. Usuario acepta
 4. Google → backend (/signin-google, interno)
 5. Backend resuelve el usuario y firma el JWT
-6. Backend responde con el AuthResponse (JSON)
+6. Backend redirige al frontend con los datos del AuthResponse en la query
 ```
 
 Ejemplo desde el front (botón):
@@ -131,11 +131,21 @@ Ejemplo desde el front (botón):
 window.location.href = "https://localhost:7113/auth/google/login";
 ```
 
-> ⚠️ **Nota de integración (leer):** actualmente el paso 6 devuelve el
-> `AuthResponse` como **JSON** en el navegador. Para una SPA lo habitual es que
-> el backend **redirija de vuelta al frontend** con el token (ej.
-> `https://mi-front.com/oauth?token=...`). Si el front lo necesita así,
-> coordínalo con backend para ajustar el callback. Ver sección 8.
+**El paso 6 ya redirige al frontend** (implementado en `OAuthRedirectBuilder`):
+
+```
+{Frontend:BaseUrl}/oauth/callback?token=...&expiresAt=...&userId=...&email=...&fullName=...&role=...
+```
+
+En caso de error, redirige con `?error=<mensaje>` en su lugar. `Frontend:BaseUrl`
+se configura en `appsettings.json` (hoy `http://localhost:5555` en desarrollo).
+El front debe implementar la ruta `/oauth/callback` para leer esos query params.
+
+> ⚠️ **Nota de seguridad:** el token viaja como parámetro de **query string**
+> (no en el fragmento `#` ni por POST), lo que lo expone a logs de acceso e
+> historial del navegador. Es un hallazgo abierto — ver `docs/bugs.md` (ítem 1)
+> para el detalle y la solución propuesta. Mientras no se corrija, el frontend
+> debe limpiar la URL (`history.replaceState`) apenas lea el token.
 
 ---
 
@@ -292,19 +302,20 @@ Stored Procedures) devuelven un formato uniforme:
 
 ## 8. Estado actual y pendientes (para coordinar)
 
+> Tabla completa y más detallada (todas las rutas, incluidas las de
+> infraestructura) en [`docs/routes.md`](routes.md). Detalle de bugs
+> encontrados en [`docs/bugs.md`](bugs.md).
+
 | Endpoint | Estado |
 |----------|--------|
-| `POST /auth/register` | ✅ Funcional |
-| `POST /auth/login` | ✅ Funcional |
-| Google / GitHub OAuth | ⚙️ Funcional, pero el callback devuelve JSON (ver sección 4.3) |
-| `POST /databases` | ⏳ Depende del SP `sp_CreateDatabase` (pendiente en la DB) |
-| `GET /databases` | ⏳ Depende del SP `sp_GetUserDatabases` (pendiente en la DB) |
+| `POST /auth/register` | ⚠️ Código completo; depende de `sp_RegisterUser` (no verificable desde este entorno de análisis, ver `routes.md`) |
+| `POST /auth/login` | ⚠️ Código completo; depende de `sp_GetLoginByEmail` (ídem) |
+| Google / GitHub OAuth | ✅ El callback **ya redirige al frontend** con el token en la query string (Opción A, ver sección 4.3). Pendiente: mover el token fuera de la query string por seguridad (`docs/bugs.md` ítem 1). |
+| `POST /databases` (`SqlServer`) | ⚠️ Único motor con provisioner real; depende de `sp_ReserveDatabase`/`sp_ConfirmDatabase`/`sp_FailDatabase` |
+| `POST /databases` (`Postgres`/`MySql`/`Mongo`) | ❌ Devuelve `501` a propósito — provisioners son stubs pendientes de implementar |
+| `GET /databases` | ⚠️ Código completo; depende de `sp_GetUserDatabases` |
 
-**Para terminar el login con OAuth en el front**, hay que decidir cómo entregar
-el token tras el callback:
-- **Opción A (recomendada para SPA):** el callback redirige a una URL del
-  frontend con el token (`.../oauth-callback?token=...`), y el front lo lee.
-- **Opción B:** el front abre el login OAuth en un popup y el callback hace
-  `postMessage` del token a la ventana principal.
-
-Coordina con backend la opción elegida para ajustar el callback.
+**El login con OAuth en el front ya está resuelto**: se implementó la
+**Opción A** (el callback redirige al frontend con el token en query string).
+Lo único pendiente es endurecer cómo viaja el token (ver nota de seguridad en
+la sección 4.3 y `docs/bugs.md`).
