@@ -1,7 +1,14 @@
 # API Colmena — Guía de consumo (Frontend)
 
 Documentación para integrar el frontend con el backend de autenticación y
-bases de datos de Colmena.
+bases de datos de Colmena. Para cada endpoint de negocio encontrarás: body de
+entrada, respuesta de éxito, **todos** los errores/excepciones posibles con su
+código HTTP exacto, y un ejemplo de consumo.
+
+> Tabla de estado de rutas (funcional/no funcional) en
+> [`docs/routes.md`](routes.md). Detalle de bugs y hallazgos de seguridad en
+> [`docs/bugs.md`](bugs.md) — esta guía referencia los ítems relevantes de ahí
+> en vez de duplicar el detalle técnico.
 
 ---
 
@@ -31,14 +38,36 @@ Todos los endpoints de login/registro devuelven un **token JWT**. El frontend de
    ```
 3. Renovar el login cuando el token expire (ver `expiresAt`).
 
-El token contiene los claims `userId`, `email` y `role` (`Admin`, `Student` o
-`Developer`), útiles para mostrar/ocultar vistas en el front.
+El token contiene los claims `sub`/`UserId`, `email` y `role`
+(`Admin`, `Student` o `Developer`), útiles para mostrar/ocultar vistas en el
+front — **no** contiene `fullName` (si lo necesitas sin volver a pedirlo,
+guárdalo del `AuthResponse` original).
 
 ---
 
-## 3. Respuesta de autenticación (`AuthResponse`)
+## 3. Qué información viaja en cada respuesta (auditoría de datos sensibles)
 
-Todos los flujos de login/registro devuelven **la misma estructura**:
+Antes del detalle por endpoint, un resumen de qué se expone y por qué — para
+que el frontend sepa qué es seguro loguear/persistir y qué no:
+
+| Dato | ¿Dónde aparece? | ¿Es sensible? |
+|---|---|---|
+| `token` (JWT) | `AuthResponse` (JSON) | Sí — es la sesión completa. Nunca lo loguees en consola de producción ni lo mandes a analytics. |
+| `userId` | `AuthResponse`, claim del JWT | Bajo riesgo — es tu propio ID, no el de otros. Es un entero secuencial (no UUID), así que en teoría permite estimar cuántos usuarios hay, pero ningún endpoint deja consultar recursos de OTRO `userId` (no hay IDOR conocido). |
+| `email`, `fullName`, `role` | `AuthResponse` | Es tu propia información, no la de otros usuarios — ningún endpoint devuelve datos de otro usuario. |
+| `mySqlDatabase.password` / `password` en `POST /databases` | Una sola vez, al crearse la BD | **Alta sensibilidad** — es la contraseña real de una BD física. Se entrega UNA vez y no se puede recuperar después (el backend solo guarda el hash). Muéstrala al usuario y no la persistas en tu propio backend/logs. |
+| `host`, `port`, `loginName` de la BD | `POST /databases`, `mySqlDatabase` | Es la info de conexión de TU propia BD — necesaria para que puedas conectarte, no expone datos de otros. |
+| Datos de otras BDs/usuarios | — | `GET /databases` y `POST /databases` están filtrados por el `userId` del JWT (vía SP); no hay forma de pedir las BDs de otro usuario. |
+| Mensajes de error de login | `POST /auth/login` | Ver `docs/bugs.md` ítem 14 (ya corregido): el mensaje es **siempre** `"Credenciales inválidas."` sin importar si el correo no existe, la contraseña es incorrecta, o la cuenta es solo-OAuth — así no se puede enumerar qué correos están registrados. |
+| PII en el redirect OAuth | `email`, `fullName`, `role`, `userId`, `token` en la query string | **Hallazgo abierto** — ver `docs/bugs.md` ítems 1 y 15. El navegador guarda esto en su historial y puede quedar en logs de acceso del servidor/proxy. Limpia la URL (`history.replaceState`) apenas la leas (ver sección 4.3). |
+| Stack traces / detalles internos de excepciones | — | Nunca se exponen. Todo error no controlado devuelve un mensaje genérico (`"Ocurrió un error inesperado."` o `"Ocurrió un error al procesar la solicitud."`); el detalle real solo queda en los logs del servidor. |
+| `PasswordHash` de usuarios | — | Nunca se serializa en ninguna respuesta; se usa solo internamente para verificar con BCrypt. |
+
+---
+
+## 4. Respuesta de autenticación (`AuthResponse`)
+
+Los flujos de login/registro **por contraseña** devuelven esta estructura:
 
 ```json
 {
@@ -47,19 +76,72 @@ Todos los flujos de login/registro devuelven **la misma estructura**:
   "userId": 12,
   "email": "ana@uni.edu",
   "fullName": "Ana Pérez",
-  "role": "Student"
+  "role": "Student",
+  "mySqlDatabase": null
 }
 ```
 
+| Campo | Tipo | Notas |
+|---|---|---|
+| `token` | string | JWT, mándalo en `Authorization: Bearer <token>` en cada request protegido. |
+| `expiresAt` | string (ISO 8601, UTC) | Cuándo expira el token — a esa hora, cualquier request protegido devuelve `401`. |
+| `userId` | number | Tu propio ID. |
+| `email` | string | Tu correo. |
+| `fullName` | string | Tu nombre completo. |
+| `role` | string | `"Admin"`, `"Student"` o `"Developer"`. |
+| `mySqlDatabase` | objeto o `null` | Ver sección 4.1 — solo viene poblado la primera vez que se crea tu BD MySQL automática. |
+
+### 4.1 Aprovisionamiento automático de BD MySQL (solo login/registro por contraseña)
+
+**La primera vez** que un usuario se registra o inicia sesión **por
+contraseña**, el backend crea automáticamente una base de datos MySQL a su
+nombre — no requiere llamar `POST /databases`. Esa única vez, `mySqlDatabase`
+viene poblado:
+
+```json
+{
+  "token": "...",
+  "expiresAt": "...",
+  "userId": 12,
+  "email": "ana@uni.edu",
+  "fullName": "Ana Pérez",
+  "role": "Student",
+  "mySqlDatabase": {
+    "databaseId": 5,
+    "engine": "MySql",
+    "dbName": "colmena_u12_principal",
+    "host": "100.99.206.50",
+    "port": 3306,
+    "loginName": "usr_colmena_u12_principal",
+    "password": "P4ssGeneradaUnaVez"
+  }
+}
+```
+
+> ⚠️ Igual que en `POST /databases` (sección 6.1), `password` **solo se
+> entrega esta vez** — el front debe mostrarla al usuario en el momento (no se
+> puede recuperar después). En logins posteriores, `mySqlDatabase` es `null`
+> porque el usuario ya tiene su BD; para ver sus BDs existentes usa
+> `GET /databases`.
+
+Si el aprovisionamiento automático falla (el motor MySQL no responde, se
+agotó una cuota, etc.), el login **igual se completa con éxito**
+(`mySqlDatabase: null`) — la autenticación no depende de la infraestructura de
+bases de datos. El usuario puede reintentar manualmente con `POST /databases`.
+
+> ⚠️ **Esto NO aplica a login por OAuth (Google/GitHub)** — ver sección 4.4:
+> el frontend tiene que llamar `POST /databases` explícitamente en ese caso.
+
 ---
 
-## 4. Endpoints de autenticación
+## 5. Endpoints de autenticación
 
-### 4.1 Registro por contraseña
+### 5.1 Registro por contraseña
 
 ```
 POST /auth/register
 ```
+Anónimo · rate limit `auth` (10/min/IP)
 
 **Body:**
 ```json
@@ -75,18 +157,25 @@ POST /auth/register
 - `password`: requerido, mín. 8 y máx. 100 caracteres.
 - `fullName`: requerido, máx. 150 caracteres.
 
-**Respuesta `200 OK`:** un `AuthResponse` (sección 3).
+**Respuesta `200 OK`:** un `AuthResponse` (sección 4), con `mySqlDatabase`
+poblado (primer login del usuario, siempre — es su registro).
 
-**Errores comunes:**
-- `400` → validación fallida (ver sección 7.1) o correo ya registrado.
+**Errores/excepciones posibles:**
+| Código | Cuándo | Mensaje exacto |
+|---|---|---|
+| `400` | Body inválido (ver sección 8.1) | `ValidationProblemDetails` estándar de ASP.NET |
+| `400` | El correo ya está registrado (regla del SP `sp_RegisterUser`) | El texto lo define el SP con `THROW`/`RAISERROR`; ejemplo visto en pruebas: `"El correo ya está registrado."` |
+| `429` | Más de 10 registros/min desde la misma IP | `"Demasiadas solicitudes. Inténtalo más tarde."` |
+| `500` | Error inesperado (motor SQL caído, etc.) | `"Ocurrió un error al procesar la solicitud."` (genérico, sin detalle interno) |
 
 ---
 
-### 4.2 Login por contraseña
+### 5.2 Login por contraseña
 
 ```
 POST /auth/login
 ```
+Anónimo · rate limit `auth` (10/min/IP)
 
 **Body:**
 ```json
@@ -96,15 +185,22 @@ POST /auth/login
 }
 ```
 
-**Respuesta `200 OK`:** un `AuthResponse` (sección 3).
+**Respuesta `200 OK`:** un `AuthResponse` (sección 4). `mySqlDatabase` viene
+poblado solo si es la primera vez que este usuario se autentica por
+contraseña (no tenía BD MySQL todavía); si no, es `null`.
 
-**Errores comunes:**
-- `401` → credenciales inválidas, cuenta inactiva, o la cuenta se creó solo con
-  login externo (OAuth) y no tiene contraseña.
+**Errores/excepciones posibles:**
+| Código | Cuándo | Mensaje exacto |
+|---|---|---|
+| `400` | Body inválido (email mal formado, password vacío) | `ValidationProblemDetails` estándar |
+| `401` | Correo no existe, contraseña incorrecta, **o la cuenta es solo-OAuth sin password** | `"Credenciales inválidas."` — siempre el mismo mensaje para los tres casos, a propósito (ver `bugs.md` ítem 14). **No asumas que puedes distinguir "correo no existe" de "password incorrecto" desde el frontend; no es posible ni debe serlo.** |
+| `401` | Credenciales correctas pero la cuenta está inactiva (`IsActive = false`) | `"La cuenta está inactiva."` |
+| `429` | Más de 10 intentos/min desde la misma IP | `"Demasiadas solicitudes. Inténtalo más tarde."` |
+| `500` | Error inesperado | `"Ocurrió un error al procesar la solicitud."` |
 
 ---
 
-### 4.3 Login con Google / GitHub (OAuth)
+### 5.3 Login con Google / GitHub (OAuth)
 
 El flujo OAuth lo maneja **el backend**. El frontend solo necesita **redirigir el
 navegador** a los endpoints de inicio:
@@ -122,7 +218,7 @@ navegador** a los endpoints de inicio:
 3. Usuario acepta
 4. Google → backend (/signin-google, interno)
 5. Backend resuelve el usuario y firma el JWT
-6. Backend redirige al frontend con los datos del AuthResponse en la query
+6. Backend redirige al frontend con los datos en la query string
 ```
 
 Ejemplo desde el front (botón):
@@ -131,45 +227,101 @@ Ejemplo desde el front (botón):
 window.location.href = "https://localhost:7113/auth/google/login";
 ```
 
-**El paso 6 ya redirige al frontend** (implementado en `OAuthRedirectBuilder`):
+**El paso 6 redirige al frontend** así:
 
 ```
 {Frontend:BaseUrl}/oauth/callback?token=...&expiresAt=...&userId=...&email=...&fullName=...&role=...
 ```
 
-En caso de error, redirige con `?error=<mensaje>` en su lugar. `Frontend:BaseUrl`
-se configura en `appsettings.json` (hoy `http://localhost:5555` en desarrollo).
-El front debe implementar la ruta `/oauth/callback` para leer esos query params.
+En caso de error, redirige con `?error=<mensaje>` en su lugar (mensajes
+posibles: `"No se pudo completar la autenticación externa."`,
+`"El proveedor externo no entregó los datos mínimos (id/email)."`, o el
+genérico `"Ocurrió un error inesperado."`). `Frontend:BaseUrl` se configura en
+`appsettings.json` (hoy `http://localhost:5555` en desarrollo). El front debe
+implementar la ruta `/oauth/callback` para leer esos query params.
 
-> ⚠️ **Nota de seguridad:** el token viaja como parámetro de **query string**
-> (no en el fragmento `#` ni por POST), lo que lo expone a logs de acceso e
-> historial del navegador. Es un hallazgo abierto — ver `docs/bugs.md` (ítem 1)
-> para el detalle y la solución propuesta. Mientras no se corrija, el frontend
-> debe limpiar la URL (`history.replaceState`) apenas lea el token.
+> ⚠️ **Nota de seguridad (`bugs.md` ítems 1 y 15):** el token JWT **y además**
+> `email`, `fullName`, `role`, `userId` viajan como parámetros de **query
+> string** (no en el fragmento `#` ni por POST), lo que los expone al
+> historial del navegador, logs de acceso del servidor/proxy, y el header
+> `Referer` si la página de callback carga cualquier recurso de terceros. Es
+> un hallazgo abierto (pendiente moverlo a un intercambio de código de un solo
+> uso). **Mientras no se corrija, el frontend DEBE:**
+> 1. Leer los query params apenas carga `/oauth/callback`.
+> 2. Guardar el token (memoria/localStorage) igual que en login por contraseña.
+> 3. Llamar **inmediatamente** `history.replaceState(null, "", "/oauth/callback")`
+>    (o navegar a otra ruta) para que esos valores no queden en el historial
+>    del navegador ni se reenvíen si el usuario comparte la URL.
+
+### 5.4 ⚠️ OAuth NO auto-aprovisiona la BD MySQL — el frontend debe pedirla
+
+A diferencia del login por contraseña (sección 4.1), el login por OAuth **NO**
+crea automáticamente la BD MySQL del usuario. Motivo técnico (`bugs.md` ítem
+16): la respuesta de OAuth viaja por redirect/query string, y no hay forma
+segura de meter ahí una contraseña real de BD sin empeorar el hallazgo de la
+nota de seguridad de arriba — antes de este fix, se generaba la BD igual y la
+contraseña se perdía para siempre sin que el usuario la viera.
+
+**Lo que el frontend debe hacer:** apenas resuelva el login OAuth (leyó el
+token del query string), comprobar si es la primera vez del usuario y, si es
+así, pedir la BD manualmente:
+
+```js
+async function ensureMySqlDatabaseAfterOAuth(token) {
+  const existing = await fetch("https://localhost:7113/databases", {
+    headers: { Authorization: `Bearer ${token}` }
+  }).then(r => r.json());
+
+  const hasMySql = existing.some(db => db.engine === "MySql");
+  if (hasMySql) return null;
+
+  const res = await fetch("https://localhost:7113/databases", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify({ engine: "MySql", dbName: "principal" })
+  });
+
+  if (!res.ok) return null; // no bloquear el login por esto
+  return res.json(); // incluye password — muéstrasela al usuario ahora
+}
+```
 
 ---
 
-## 5. Endpoints de bases de datos (protegidos)
+## 6. Endpoints de bases de datos (protegidos)
 
 Requieren header `Authorization: Bearer <token>`.
 
-### 5.1 Crear (aprovisionar) una base de datos
+### 6.1 Crear (aprovisionar) una base de datos
 
 ```
 POST /databases
 ```
+JWT Bearer · rate limit `db-provisioning` (**5/min por usuario**, además del
+límite global de 100/min/IP) — crear una BD física es costoso y no debe poder
+repetirse en bucle.
 
 **Body:**
 ```json
 {
   "engine": "SqlServer",
-  "dbName": "proyecto_ana"
+  "dbName": "proyecto_ana",
+  "maxConcurrentConnections": 10
 }
 ```
 
-- `engine`: **requerido**. Valores: `"SqlServer"`, `"Postgres"`, `"MySql"`, `"Mongo"`.
-  Hoy solo `"SqlServer"` está implementado; los demás devuelven `501`.
-- `dbName`: requerido, máx. 128 (el backend le antepone un prefijo por usuario).
+| Campo | Requerido | Notas |
+|---|---|---|
+| `engine` | Sí | `"SqlServer"`, `"Postgres"`, `"MySql"` o `"Mongo"`. Los 4 tienen provisioner real (creación de usuario/rol + BD + permisos acotados a esa BD). Máx. 20 caracteres. |
+| `dbName` | Sí | Máx. 128 caracteres. El backend le antepone un prefijo por usuario (ej. `colmena_u12_...`). |
+| `maxConcurrentConnections` | No | Entero 1-100. Si se omite, usa el default del motor (hoy 5). El backend SIEMPRE lo acota a un tope duro por motor (hoy 20) sin importar lo que pidas. Solo tiene efecto real en **MySQL** y **Postgres**; en **SqlServer**/**Mongo** se ignora (`bugs.md` ítem 12). |
+
+> No necesitas llamar este endpoint para tu primera BD MySQL si entraste por
+> contraseña (sección 4.1). Si entraste por OAuth, sí necesitas llamarlo tú
+> (sección 5.4). Úsalo también para BDs adicionales o de otro motor.
 
 **Respuesta `201 Created`:**
 ```json
@@ -179,27 +331,39 @@ POST /databases
   "dbName": "colmena_u12_proyecto_ana",
   "status": "Active",
   "maxStorageMB": 20,
-  "host": "46.224.101.88",
+  "maxConcurrentConnections": 10,
+  "host": "100.99.206.50",
   "port": 1433,
   "loginName": "usr_colmena_u12_proyecto_ana",
   "password": "P4ssGeneradaUnaVez"
 }
 ```
 
-> ⚠️ El campo `password` son las credenciales de acceso a la BD y **solo se
-> devuelven en esta respuesta**. El front debe mostrárselas al usuario en ese
-> momento (no se pueden recuperar después).
+> `maxConcurrentConnections` en la respuesta es el valor **efectivamente
+> aplicado** (ya acotado al cap), puede diferir de lo pedido. Vale `0` en
+> SqlServer/Mongo porque ahí no se aplica.
+>
+> ⚠️ `password` son las credenciales de acceso a la BD y **solo se devuelven
+> en esta respuesta**. Muéstraselas al usuario en ese momento — no se pueden
+> recuperar después (el backend solo guarda el hash).
 
-**Errores comunes:**
-- `400` → `engine` no soportado o `dbName` inválido.
-- `401` → token ausente/inválido.
-- `501` → el motor pedido aún no está implementado (`Postgres`/`MySql`/`Mongo`).
+**Errores/excepciones posibles:**
+| Código | Cuándo | Mensaje exacto |
+|---|---|---|
+| `400` | Body inválido (`engine`/`dbName` faltantes, `maxConcurrentConnections` fuera de 1-100) | `ValidationProblemDetails` estándar |
+| `400` | `engine` no es uno de los 4 soportados | `"Motor de base de datos no soportado: '{engine}'."` |
+| `400` | Regla de negocio del catálogo (cuota excedida, nombre duplicado, etc. — la decide `sp_ReserveDatabase`) | Mensaje definido por el SP |
+| `401` | Token ausente, inválido o expirado | — (respuesta estándar de `[Authorize]`) |
+| `401` | Token válido pero sin claim `UserId` legible | `"El token no contiene un identificador de usuario válido."` |
+| `429` | Más de 5 creaciones/min de este usuario | `"Demasiadas solicitudes. Inténtalo más tarde."` |
+| `500` | Falla la creación física en el motor (credenciales admin mal configuradas, motor caído, etc.) — el backend revierte la reserva automáticamente | `"Ocurrió un error al procesar la solicitud."` o `"Ocurrió un error inesperado."` según el tipo de excepción; nunca el detalle interno |
 
-### 5.2 Listar mis bases de datos
+### 6.2 Listar mis bases de datos
 
 ```
 GET /databases
 ```
+JWT Bearer
 
 **Respuesta `200 OK`:**
 ```json
@@ -218,14 +382,121 @@ GET /databases
 ]
 ```
 
-**Errores comunes:**
-- `401` → falta el token, es inválido o expiró.
+Nota: **no** incluye `loginName` ni `password` — esas credenciales solo se
+entregan una vez, en el momento de la creación (sección 6.1 / 4.1). Si el
+usuario las perdió, hoy no existe un endpoint para regenerarlas (ver
+`bugs.md`, backlog).
+
+> ⚠️ Sobre `currentSizeMB`: no está confirmado que refleje el tamaño real y
+> actualizado de la BD física en todos los motores — no hay (todavía) un job
+> que sincronice esto contra MySQL/Postgres/Mongo en vivo. Ver `bugs.md` ítem
+> 10. Trátalo como informativo, no como fuente de verdad para bloquear
+> escrituras del lado del frontend.
+
+**Errores/excepciones posibles:**
+| Código | Cuándo |
+|---|---|
+| `401` | Falta el token, es inválido o expiró |
 
 ---
 
-## 6. Ejemplos con `fetch` (JavaScript)
+## 7. Estadísticas de la plataforma (solo Admin)
 
-### Registro / Login
+```
+GET /statistics
+```
+JWT Bearer, requiere claim `role = "Admin"`
+
+**Respuesta `200 OK`:**
+```json
+{
+  "totalUsers": 120,
+  "activeUsers": 98,
+  "totalDatabases": 45,
+  "activeDatabases": 40,
+  "totalLogins": 530,
+  "serviceAvailable": true
+}
+```
+
+Son solo conteos agregados de toda la plataforma — no expone datos
+individuales de ningún usuario ni de ninguna BD en particular.
+
+**Errores/excepciones posibles:**
+| Código | Cuándo |
+|---|---|
+| `401` | Token ausente, inválido o expirado |
+| `403` | Token válido pero el usuario no tiene rol `Admin` |
+
+---
+
+## 8. Manejo de errores
+
+### 8.1 Errores de validación (`400`)
+Cuando falla la validación del modelo (campos requeridos, formato, rangos),
+la API devuelve el formato estándar de ASP.NET (`ValidationProblemDetails`):
+
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+  "title": "One or more validation errors occurred.",
+  "status": 400,
+  "errors": {
+    "Email": ["The Email field is not a valid e-mail address."],
+    "Password": ["The field Password must be a string with a minimum length of 8."]
+  }
+}
+```
+
+### 8.2 Errores de negocio / autenticación / infraestructura
+Todo lo demás (credenciales inválidas, correo duplicado, reglas de los
+Stored Procedures, rate limit excedido, errores inesperados) devuelve un
+formato uniforme:
+
+```json
+{
+  "status": 401,
+  "error": "Credenciales inválidas."
+}
+```
+
+| Código | Significado | ¿El mensaje es seguro de mostrar al usuario tal cual? |
+|--------|-------------|---|
+| `400` | Datos inválidos o regla de negocio incumplida | Sí — estos mensajes están escritos para mostrarse. |
+| `401` | No autenticado / token inválido / credenciales incorrectas | Sí. |
+| `403` | Autenticado pero sin el rol requerido | Sí. |
+| `429` | Rate limit excedido | Sí — además viene el header `Retry-After` con los segundos a esperar. |
+| `500` | Error inesperado del servidor | Sí, pero es deliberadamente genérico (nunca incluye detalle interno/stack trace — eso solo queda en logs del backend). No hay nada más específico que extraer de un 500. |
+
+**Patrón recomendado para consumir cualquier endpoint:**
+
+```js
+async function apiCall(url, options = {}) {
+  const res = await fetch(url, options);
+
+  if (res.status === 429) {
+    const retryAfter = res.headers.get("Retry-After");
+    throw new Error(`Demasiadas solicitudes, reintenta en ${retryAfter}s`);
+  }
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    // ValidationProblemDetails trae "errors"; el resto trae "error"
+    const message = body?.errors
+      ? Object.values(body.errors).flat().join(" ")
+      : (body?.error ?? "Error inesperado");
+    throw new Error(message);
+  }
+
+  return res.status === 201 || res.status === 200 ? res.json() : null;
+}
+```
+
+---
+
+## 9. Ejemplos con `fetch` (JavaScript)
+
+### Registro / Login por contraseña
 ```js
 async function login(email, password) {
   const res = await fetch("https://localhost:7113/auth/login", {
@@ -241,7 +512,36 @@ async function login(email, password) {
 
   const auth = await res.json();
   localStorage.setItem("token", auth.token);
+
+  if (auth.mySqlDatabase) {
+    // Primera vez de este usuario: muéstrale la contraseña AHORA, no se
+    // puede recuperar después.
+    showDatabaseCredentialsOnce(auth.mySqlDatabase);
+  }
+
   return auth;
+}
+```
+
+### Callback OAuth
+```js
+// En la ruta /oauth/callback de tu frontend:
+async function handleOAuthCallback() {
+  const params = new URLSearchParams(window.location.search);
+
+  if (params.has("error")) {
+    throw new Error(params.get("error"));
+  }
+
+  const token = params.get("token");
+  localStorage.setItem("token", token);
+
+  // Limpiar la URL cuanto antes (nota de seguridad, sección 5.3).
+  window.history.replaceState(null, "", "/oauth/callback");
+
+  // OAuth no auto-aprovisiona MySQL (sección 5.4) — pedirlo si hace falta.
+  const db = await ensureMySqlDatabaseAfterOAuth(token);
+  if (db) showDatabaseCredentialsOnce(db);
 }
 ```
 
@@ -263,44 +563,7 @@ async function getMyDatabases() {
 
 ---
 
-## 7. Manejo de errores
-
-### 7.1 Errores de validación (`400`)
-Cuando falla la validación del modelo (campos requeridos, formato), la API
-devuelve el formato estándar de ASP.NET (`ValidationProblemDetails`):
-
-```json
-{
-  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
-  "title": "One or more validation errors occurred.",
-  "status": 400,
-  "errors": {
-    "Email": ["The Email field is not a valid e-mail address."],
-    "Password": ["The field Password must be a string with a minimum length of 8."]
-  }
-}
-```
-
-### 7.2 Errores de negocio / autenticación
-Los errores controlados (credenciales inválidas, correo duplicado, reglas de los
-Stored Procedures) devuelven un formato uniforme:
-
-```json
-{
-  "status": 401,
-  "error": "Credenciales inválidas."
-}
-```
-
-| Código | Significado |
-|--------|-------------|
-| `400` | Datos inválidos o regla de negocio incumplida |
-| `401` | No autenticado / token inválido / credenciales incorrectas |
-| `500` | Error inesperado del servidor |
-
----
-
-## 8. Estado actual y pendientes (para coordinar)
+## 10. Estado actual y pendientes (para coordinar)
 
 > Tabla completa y más detallada (todas las rutas, incluidas las de
 > infraestructura) en [`docs/routes.md`](routes.md). Detalle de bugs
@@ -308,14 +571,16 @@ Stored Procedures) devuelven un formato uniforme:
 
 | Endpoint | Estado |
 |----------|--------|
-| `POST /auth/register` | ⚠️ Código completo; depende de `sp_RegisterUser` (no verificable desde este entorno de análisis, ver `routes.md`) |
-| `POST /auth/login` | ⚠️ Código completo; depende de `sp_GetLoginByEmail` (ídem) |
-| Google / GitHub OAuth | ✅ El callback **ya redirige al frontend** con el token en la query string (Opción A, ver sección 4.3). Pendiente: mover el token fuera de la query string por seguridad (`docs/bugs.md` ítem 1). |
-| `POST /databases` (`SqlServer`) | ⚠️ Único motor con provisioner real; depende de `sp_ReserveDatabase`/`sp_ConfirmDatabase`/`sp_FailDatabase` |
-| `POST /databases` (`Postgres`/`MySql`/`Mongo`) | ❌ Devuelve `501` a propósito — provisioners son stubs pendientes de implementar |
-| `GET /databases` | ⚠️ Código completo; depende de `sp_GetUserDatabases` |
+| `POST /auth/register` | ⚠️ Código completo; depende de `sp_RegisterUser` (confirmado en vivo funcionando, sin el bug de `Roles` — `bugs.md` ítem 9) |
+| `POST /auth/login` | ✅ Confirmado en vivo funcionando. Enumeración de cuentas OAuth-only corregida (`bugs.md` ítem 14). |
+| Google / GitHub OAuth | ⚠️ Funcional, pero expone PII + token en query string (`bugs.md` ítems 1 y 15, abiertos) — el front debe limpiar la URL (sección 5.3). Ya NO auto-aprovisiona MySQL (`bugs.md` ítem 16, corregido) — el front debe pedirlo (sección 5.4). |
+| `POST /databases` (los 4 motores) | ⚠️ Los 4 provisioners están implementados; depende de `sp_ReserveDatabase`/`sp_ConfirmDatabase`/`sp_FailDatabase`. Rate limit dedicado (5/min/usuario) y `maxConcurrentConnections` configurable agregados. |
+| Auto-aprovisionamiento MySQL en primer login/registro por contraseña | ✅ Implementado. NO aplica a OAuth (ver arriba). |
+| `GET /databases` | ⚠️ Código completo; depende de `sp_GetUserDatabases`. No confirmado si `currentSizeMB` refleja tamaño real (`bugs.md` ítem 10). |
+| `GET /statistics` (solo Admin) | ⚠️ Código completo; depende de `sp_GetPlatformStatistics`, no verificado en vivo todavía. |
 
-**El login con OAuth en el front ya está resuelto**: se implementó la
-**Opción A** (el callback redirige al frontend con el token en query string).
-Lo único pendiente es endurecer cómo viaja el token (ver nota de seguridad en
-la sección 4.3 y `docs/bugs.md`).
+**Aislamiento entre usuarios en el motor físico** (relevante si el frontend
+alguna vez conecta directo a las BDs, no solo vía esta API): SQL Server y
+Postgres ya restringen qué bases puede ver/a cuáles conectarse un usuario
+recién creado; MySQL tiene una limitación conocida del motor (nombres de
+otras BDs visibles, pero no sus datos) — detalle en `bugs.md` ítem 13.

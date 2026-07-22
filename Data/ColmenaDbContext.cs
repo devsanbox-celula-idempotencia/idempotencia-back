@@ -21,6 +21,7 @@ public class ColmenaDbContext : DbContext
     public DbSet<UserIdentity> UserIdentities => Set<UserIdentity>();
     public DbSet<ProvisionedDatabaseInfo> ProvisionedDatabases => Set<ProvisionedDatabaseInfo>();
     public DbSet<DatabaseReservation> DatabaseReservations => Set<DatabaseReservation>();
+    public DbSet<PlatformStatistics> PlatformStatistics => Set<PlatformStatistics>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -47,6 +48,12 @@ public class ColmenaDbContext : DbContext
         });
 
         modelBuilder.Entity<DatabaseReservation>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+        });
+
+        modelBuilder.Entity<PlatformStatistics>(e =>
         {
             e.HasNoKey();
             e.ToView(null);

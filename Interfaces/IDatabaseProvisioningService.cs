@@ -9,6 +9,12 @@ namespace idempotencia.Interfaces;
 /// </summary>
 public interface IDatabaseProvisioningService
 {
+    /// <summary>
+    /// <paramref name="requestedMaxConcurrentConnections"/> es lo que pidió el
+    /// cliente (puede ser null); el servicio lo resuelve contra el default y
+    /// el cap del motor antes de pasarlo al provisioner físico.
+    /// </summary>
     Task<CreateDatabaseResponse> ProvisionAsync(
-        int userId, string engine, string dbName, CancellationToken ct = default);
+        int userId, string engine, string dbName,
+        int? requestedMaxConcurrentConnections = null, CancellationToken ct = default);
 }

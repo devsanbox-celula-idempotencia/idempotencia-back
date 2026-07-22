@@ -18,3 +18,14 @@ reflejarse en el mismo cambio en:
 Si se descubre un bug o comportamiento inesperado durante ese trabajo,
 regístralo en [`docs/bugs.md`](docs/bugs.md) con tipo de problema y solución
 propuesta, en vez de dejarlo solo mencionado en el chat.
+
+## Historial del proyecto (bitácora incremental)
+
+Al cierre de cualquier sesión que implemente una feature, corrija un bug
+confirmado, o tome una decisión de arquitectura relevante, agrega una entrada
+en [`docs/claude.md`](docs/claude.md) siguiendo la convención descrita al
+inicio de ese archivo (fecha, resumen, qué se hizo, qué queda pendiente).
+Actualiza también su sección "Backlog / próximos pasos" (saca lo resuelto,
+agrega lo nuevo). El objetivo es que cualquier sesión futura pueda leer ese
+archivo y saber exactamente en qué punto quedó el proyecto sin tener que
+reconstruir el contexto desde el chat.

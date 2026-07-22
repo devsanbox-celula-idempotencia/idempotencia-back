@@ -1,32 +1,67 @@
 using idempotencia.Interfaces;
-using idempotencia.Middleware;
 using idempotencia.Models;
+using MongoDB.Bson;
+using MongoDB.Driver;
 
 namespace idempotencia.Provisioners;
 
 /// <summary>
-/// STUB (pendiente de implementar). MongoDB NO es SQL. Cuando se aborde:
-///   1. Añadir el paquete NuGet <c>MongoDB.Driver</c>.
-///   2. Conectarse con un usuario admin del clúster.
-///   3. Mongo crea la BD de forma perezosa: hay que "materializarla" creando una
-///      colección inicial y luego el usuario con roles:
-///        db.createCollection("_init")
-///        db.runCommand({ createUser: "login", pwd: "...",
-///                        roles: [{ role: "readWrite", db: "dbName" }] })
-///   4. La cuota se controla con límites del clúster o monitoreo (no hay MAXSIZE).
+/// Provisioner de MongoDB. Materializa la base creando una colección inicial y
+/// registra un usuario con rol readWrite sobre ella. La cuota de tamaño no es
+/// nativa por BD, por lo que <paramref name="maxStorageMb"/> no se aplica aquí.
 /// </summary>
 public class MongoProvisioner : IDatabaseProvisioner
 {
+    private readonly string _adminConnectionString;
+    private readonly string _host;
+    private readonly int _port;
+
     public string Engine => DatabaseEngine.Mongo;
 
-    public Task<ProvisionResult> CreateAsync(
-        string dbName, string login, string password, int maxStorageMb, CancellationToken ct = default) =>
-        throw new AppException(
-            "El aprovisionamiento de MongoDB aún no está implementado.",
-            StatusCodes.Status501NotImplemented);
+    public MongoProvisioner(IConfiguration config)
+    {
+        _adminConnectionString = config["Provisioning:Mongo:AdminConnectionString"]
+            ?? throw new InvalidOperationException("Falta Provisioning:Mongo:AdminConnectionString.");
+        _host = config["Provisioning:Mongo:Host"] ?? "localhost";
+        _port = int.TryParse(config["Provisioning:Mongo:Port"], out var p) ? p : 27017;
+    }
 
-    public Task DropAsync(string dbName, string login, CancellationToken ct = default) =>
-        throw new AppException(
-            "El aprovisionamiento de MongoDB aún no está implementado.",
-            StatusCodes.Status501NotImplemented);
+    public async Task<ProvisionResult> CreateAsync(
+        string dbName, string login, string password, int maxStorageMb,
+        int maxConcurrentConnections, CancellationToken ct = default)
+    {
+        // maxConcurrentConnections: Mongo no expone un límite nativo por
+        // usuario (solo net.maxIncomingConnections a nivel de servidor
+        // completo) — se ignora aquí a propósito. Ver docs/bugs.md ítem 12.
+        var db = new MongoClient(_adminConnectionString).GetDatabase(dbName);
+
+        await db.CreateCollectionAsync("_init", cancellationToken: ct);
+
+        var createUser = new BsonDocument
+        {
+            { "createUser", login },
+            { "pwd", password },
+            { "roles", new BsonArray { new BsonDocument { { "role", "readWrite" }, { "db", dbName } } } }
+        };
+        await db.RunCommandAsync<BsonDocument>(createUser, cancellationToken: ct);
+
+        return new ProvisionResult(_host, _port);
+    }
+
+    public async Task DropAsync(string dbName, string login, CancellationToken ct = default)
+    {
+        var client = new MongoClient(_adminConnectionString);
+        var db = client.GetDatabase(dbName);
+
+        try
+        {
+            await db.RunCommandAsync<BsonDocument>(new BsonDocument { { "dropUser", login } }, cancellationToken: ct);
+        }
+        catch (MongoException)
+        {
+            // El usuario puede no existir si el fallo ocurrió antes de crearlo.
+        }
+
+        await client.DropDatabaseAsync(dbName, ct);
+    }
 }
