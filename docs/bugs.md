@@ -473,6 +473,51 @@ Ver `docs/API.md` sección 3.1 y 4.3, actualizadas con esta nota.
 
 ---
 
+### 17. `redirect_uri` de OAuth viajaba como `http://` en vez de `https://` detrás del reverse proxy de QA — CORREGIDO
+**Estado:** 🟡 Fix entregado (aplicado en código; pendiente que el usuario
+confirme en vivo tras desplegar en QA).
+**Tipo:** Bug de configuración de infraestructura (rompe el login OAuth por
+completo en cualquier ambiente detrás de reverse proxy).
+**Dónde:** [`Program.cs`](../Program.cs) — faltaba `UseForwardedHeaders`.
+**Problema:** en el despliegue de QA (`docs.idempotencia.andrescortes.dev`),
+Google devolvía `Error 400: redirect_uri_mismatch` con el detalle
+`redirect_uri=http://docs.idempotencia.andrescortes.dev/signin-google`
+(confirmado directamente en la pantalla de error de Google). El URI
+registrado en Google Cloud Console es `https://...`. Causa: el backend está
+detrás de un reverse proxy que termina TLS y le reenvía la petición como HTTP
+plano; sin `ForwardedHeaders` configurado, ASP.NET Core no sabía que el
+esquema original era `https` y `Microsoft.AspNetCore.Authentication.Google`
+armaba el `redirect_uri` del `Challenge` con el esquema que veía (`http`),
+que nunca coincide con lo registrado. Este mismo gap ya estaba anotado en
+`docs/API.md` (sección de rate limiting) como pendiente para el entorno de
+despliegue, pero solo se había evaluado su impacto en la partición de IP del
+rate limiter, no en OAuth.
+**Solución aplicada:**
+```csharp
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
+// ...
+app.UseForwardedHeaders(); // primera línea del pipeline, antes de HttpsRedirection/Auth
+```
+`KnownNetworks`/`KnownProxies` se vaciaron porque el proxy real de QA no está
+en `localhost` (rango de confianza por defecto de ASP.NET Core). Esto asume
+que el backend **no es alcanzable directamente** sin pasar por el proxy — si
+en algún ambiente eso no es cierto, hay que restringir esas listas a la IP
+real del proxy en vez de vaciarlas (vaciarlas por completo permite spoofear
+`X-Forwarded-For`/`X-Forwarded-Proto` a quien le pegue directo al backend).
+**Efecto secundario positivo:** esto también resuelve, de paso, la limitación
+de rate limiting detrás de proxy que ya estaba documentada en `docs/API.md`
+(la partición por IP ahora usa la IP real del cliente, no la del proxy).
+**Pendiente:** confirmar en vivo contra el despliegue de QA que
+`redirect_uri` ya sale como `https://` y que el login con Google completa el
+flujo sin `redirect_uri_mismatch`.
+
+---
+
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
@@ -497,3 +542,4 @@ Ver `docs/API.md` sección 3.1 y 4.3, actualizadas con esta nota.
 | 7 | Claim `"UserId"` duplicado como string literal | 🟡 Baja | 🔴 Abierto |
 | 6 | `idempotencia.http` con endpoint obsoleto | ⚪ Cosmético | 🔴 Abierto |
 | 8 | Doc desactualizada sobre callback OAuth | ⚪ Ya corregido en esta revisión | 🟢 Resuelto |
+| 17 | `redirect_uri` de OAuth en `http://` en vez de `https://` detrás del reverse proxy (QA) — rompía el login completo | 🔴 Alta | 🟡 Fix entregado, pendiente confirmar en QA |

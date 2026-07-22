@@ -9,6 +9,7 @@ using idempotencia.Repository;
 using idempotencia.Services;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -96,6 +97,25 @@ builder.Services.AddAuthentication(options =>
         options.Scope.Add("user:email");
     });
 
+// ---------------------------------------------------------------------------
+// ForwardedHeaders: detrás de un reverse proxy (nginx, IIS, load balancer),
+// el backend recibe la petición como HTTP plano aunque el cliente haya usado
+// HTTPS. Sin esto, ASP.NET Core arma el `redirect_uri` de OAuth con esquema
+// "http" (Google lo rechaza con redirect_uri_mismatch, porque el registrado
+// en Google Cloud Console es "https") y además el rate limiting por IP
+// (más abajo) particiona todo por la IP del proxy en vez de la del cliente.
+// KnownNetworks/KnownProxies se vacían porque el proxy real no está en
+// localhost; esto asume que el backend SOLO es alcanzable a través del
+// proxy (nunca directo desde internet) — si eso cambia, hay que restringir
+// estas listas a la IP real del proxy en vez de vaciarlas.
+// ---------------------------------------------------------------------------
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
+
 builder.Services.AddAuthorization();
 builder.Services.AddControllers();
 builder.Services.AddOpenApi(options =>
@@ -132,8 +152,8 @@ builder.Services.AddCors(options =>
 // Rate limiting (nativo de .NET). Protege contra abuso/fuerza bruta.
 //   - Política "auth": estricta, para login/registro (por IP).
 //   - GlobalLimiter: límite general de seguridad por IP para toda la API.
-// La partición usa la IP remota; detrás de un proxy inverso (despliegue) hay
-// que habilitar ForwardedHeaders para que la IP real llegue correctamente.
+// La partición usa la IP remota; detrás de un proxy inverso (despliegue),
+// ForwardedHeaders (configurado arriba) ya resuelve la IP real del cliente.
 // ---------------------------------------------------------------------------
 const string AuthRateLimitPolicy = "auth";
 const string DbProvisioningRateLimitPolicy = "db-provisioning";
@@ -200,6 +220,11 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
+// Debe ir lo primero posible: todo lo que sigue (HttpsRedirection, generación
+// de redirect_uri de OAuth, rate limiting por IP, autenticación) depende de
+// que HttpContext.Request.Scheme / Connection.RemoteIpAddress reflejen los
+// valores reales del cliente y no los del salto interno con el proxy.
+app.UseForwardedHeaders();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 
