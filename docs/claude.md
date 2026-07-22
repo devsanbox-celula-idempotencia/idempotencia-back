@@ -194,41 +194,6 @@ el chat.
 
 ---
 
-## Backlog / próximos pasos
-
-Pendientes conocidos, de mayor a menor severidad (detalle y solución
-propuesta en `docs/bugs.md`):
-
-1. **Confirmar `sp_UpsertExternalLogin`** (callback OAuth Google/GitHub) si
-   tiene el mismo bug de `Roles`/`RoleId` que tenía `sp_GetLoginByEmail`
-   (ítem 9, ya resuelto) — pedir su `sp_helptext` o probar un login OAuth
-   real. `sp_RegisterUser` ya se confirmó SIN el bug.
-2. **Ciclo de vida (TTL)**: implementar `sp_GetIdleDatabases`,
-   `sp_PauseDatabase`, `sp_DeleteDatabase` + `DatabaseLifecycleJob`
-   (`IHostedService`) — ítem 11 de `bugs.md`. Definir primero de dónde sale
-   la señal real de `LastActivityAt`.
-3. **Cuota de almacenamiento real** para Postgres/MySQL/Mongo —
-   `DatabaseQuotaMonitor` (`IHostedService`) — ítem 10 de `bugs.md`.
-4. **Límite de conexiones concurrentes en SQL Server** vía logon trigger,
-   probado contra una BD de prueba antes de desplegar — ítem 12 de
-   `bugs.md`.
-5. Token JWT viaja en query string en el redirect OAuth — ítem 1 de
-   `bugs.md` (mover a fragmento `#` o a un código de un solo uso).
-6. Secretos reales en texto plano en `appsettings.json` — ítem 3 de
-   `bugs.md` (mover a User Secrets / vault).
-7. Vulnerabilidad conocida en `Microsoft.OpenApi` — ítem 4 de `bugs.md`
-   (actualizar el paquete).
-8. Sin rate limit dedicado en los 4 endpoints OAuth (`/auth/google/*`,
-   `/auth/github/*`) — ítem 2 de `bugs.md`.
-9. `CurrentSizeMB` sin tipo de columna explícito en EF Core — ítem 5 de
-   `bugs.md` (riesgo de truncamiento silencioso).
-10. Verificar en vivo que `sp_ReserveDatabase`, `sp_ConfirmDatabase`,
-    `sp_FailDatabase` y `sp_GetPlatformStatistics` devuelven exactamente las
-    columnas que esperan sus `Models/*.cs` — `sp_GetLoginByEmail`,
-    `sp_RegisterUser` y `sp_GetUserDatabases` ya se verificaron en vivo.
-
----
-
 ## Sesión 4 — 2026-07-21 (CORS a config, aislamiento entre BDs, concurrencia configurable, auditoría de datos sensibles)
 
 **Pedido:** mover CORS a `appsettings.json`; corregir que los usuarios
@@ -285,3 +250,72 @@ respuestas, excepciones, cómo consumir cada parte).
 
 **Pendiente:** nada nuevo se agregó al backlog salvo lo ya listado arriba
 (ítem 15 sigue abierto, mismo fix que el ítem 1).
+
+---
+
+## Sesión 5 — 2026-07-22 (fix de `redirect_uri_mismatch` en OAuth de QA + documentación para Docusaurus)
+
+**Pedido:** el usuario reportó `Error 400: invalid_request` / luego
+`redirect_uri_mismatch` al intentar iniciar sesión con Google en el ambiente
+de QA (`docs.idempotencia.andrescortes.dev`). En paralelo, pidió generar
+documentación del backend para subir a un sitio Docusaurus.
+
+**Qué se hizo:**
+
+1. **Documentación para Docusaurus**: se generó un set de páginas markdown
+   (visión general, autenticación, referencia de la API, aprovisionamiento
+   de BD, manejo de errores/rate limiting, configuración por ambiente,
+   seguridad y pendientes) a partir del código real y de `docs/API.md`,
+   `docs/routes.md` y `docs/bugs.md` existentes. Los secretos reales de
+   `appsettings.json` se excluyeron deliberadamente (ver `bugs.md` ítem 3).
+   Luego se consolidó todo en un único archivo (`idempotencia-back-docusaurus.md`)
+   a pedido del usuario, para pasárselo directo a quien arma el sitio.
+2. **Diagnóstico de `redirect_uri_mismatch`** (`docs/bugs.md` ítem 17,
+   nuevo): revisando la petición de red del usuario se confirmó que
+   `GET /auth/google/login` respondía `302` correctamente (comportamiento
+   esperado, no el bug), pero el `redirect_uri` que Google recibía era
+   `http://docs.idempotencia.andrescortes.dev/signin-google` en vez de
+   `https://...` (lo registrado en Google Cloud Console). Causa: el backend
+   corre detrás de un reverse proxy en QA que termina TLS y reenvía como HTTP
+   plano, y `Program.cs` no tenía `ForwardedHeaders` configurado — ASP.NET
+   Core no sabía que el esquema original era `https` al armar el `Challenge`
+   de `Microsoft.AspNetCore.Authentication.Google`.
+3. **Fix aplicado en `Program.cs`**: se agregó
+   `builder.Services.Configure<ForwardedHeadersOptions>(...)` (con
+   `X-Forwarded-For` + `X-Forwarded-Proto`, `KnownNetworks`/`KnownProxies`
+   vaciados porque el proxy real no está en `localhost`) y
+   `app.UseForwardedHeaders()` como primera línea del pipeline, antes de
+   `UseHttpsRedirection`/autenticación. Efecto secundario positivo: también
+   resuelve la limitación ya documentada de que el rate limiting por IP
+   colapsaba detrás de un proxy (README.md, sección de rate limiting,
+   actualizada de "pendiente" a "resuelto").
+4. **Docs actualizados**: `docs/bugs.md` (ítem 17 nuevo, estado 🟡 fix
+   entregado — falta confirmar en vivo tras desplegar), `README.md` (nota de
+   rate limiting tras proxy, ahora ✅), esta entrada.
+
+**Pendiente:** el usuario debe desplegar el cambio en QA y confirmar que
+`redirect_uri` ya sale como `https://` y que el login con Google completa sin
+error, para pasar el ítem 17 de 🟡 a 🟢.
+
+## Backlog / próximos pasos
+
+1. **Confirmar en vivo el fix del ítem 17** (`redirect_uri_mismatch` en QA)
+   tras desplegar — mover de 🟡 a 🟢 en `bugs.md`.
+2. **Confirmar `sp_UpsertExternalLogin`** (callback OAuth Google/GitHub) si
+   tiene el mismo bug de `Roles`/`RoleId` que tenía `sp_GetLoginByEmail`
+   (ítem 9, ya resuelto).
+3. **Ciclo de vida (TTL)**: implementar `sp_GetIdleDatabases`,
+   `sp_PauseDatabase`, `sp_DeleteDatabase` + `DatabaseLifecycleJob` — ítem 11
+   de `bugs.md`.
+4. **Cuota de almacenamiento real** para Postgres/MySQL/Mongo — ítem 10 de
+   `bugs.md`.
+5. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
+   ítem 12 de `bugs.md`.
+6. Token JWT (y PII) viaja en query string en el redirect OAuth — ítems 1 y
+   15 de `bugs.md`.
+7. Secretos reales en texto plano en `appsettings.json` — ítem 3 de
+   `bugs.md`.
+8. Vulnerabilidad conocida en `Microsoft.OpenApi` — ítem 4 de `bugs.md`.
+9. Sin rate limit dedicado en los 4 endpoints OAuth — ítem 2 de `bugs.md`.
+10. `CurrentSizeMB` sin tipo de columna explícito en EF Core — ítem 5 de
+    `bugs.md`.

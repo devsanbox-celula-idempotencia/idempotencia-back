@@ -1,0 +1,8 @@
+{
+  "label": "idempotencia-back (API Colmena)",
+  "position": 1,
+  "link": {
+    "type": "generated-index",
+    "description": "Documentación del backend de aprovisionamiento de bases de datos y autenticación de la plataforma Colmena."
+  }
+}

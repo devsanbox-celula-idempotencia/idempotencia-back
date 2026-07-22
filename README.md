@@ -186,9 +186,8 @@ Aplican a **cualquier** endpoint:
 |--------|-------|
 | `429 Too Many Requests` | Se superó el límite de la ventana (por IP). El header `Retry-After` indica los segundos a esperar. |
 
-> ⚠️ **Detrás de proxy inverso (despliegue):** la partición usa
-> `RemoteIpAddress`. Tras un reverse proxy todas las peticiones comparten la IP
-> del proxy, colapsando el límite. Para el despliegue en
-> `idempotencia.andrescortes.dev` hay que habilitar `ForwardedHeaders`
-> (`X-Forwarded-For`) para que llegue la IP real del cliente. **Pendiente para
-> el entorno de despliegue.**
+> ✅ **Detrás de proxy inverso (despliegue):** resuelto — `Program.cs` habilita
+> `ForwardedHeaders` (`X-Forwarded-For` + `X-Forwarded-Proto`), así que la
+> partición usa la IP real del cliente y no la del proxy. Este mismo cambio
+> corrigió de paso un `redirect_uri_mismatch` en el login OAuth de Google
+> (ver `docs/bugs.md` ítem 17).
