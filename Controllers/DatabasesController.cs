@@ -5,6 +5,7 @@ using idempotencia.Middleware;
 using idempotencia.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace idempotencia.Controllers;
 
@@ -31,12 +32,14 @@ public class DatabasesController : ControllerBase
 
     /// <summary>Crea (aprovisiona) una BD del motor indicado para el usuario autenticado.</summary>
     [HttpPost]
+    [EnableRateLimiting("db-provisioning")]
     public async Task<ActionResult<CreateDatabaseResponse>> Create(
         [FromBody] CreateDatabaseRequest request, CancellationToken ct)
     {
         var userId = GetUserId();
 
-        var response = await _provisioning.ProvisionAsync(userId, request.Engine, request.DbName, ct);
+        var response = await _provisioning.ProvisionAsync(
+            userId, request.Engine, request.DbName, request.MaxConcurrentConnections, ct);
 
         return CreatedAtAction(nameof(GetMine), new { id = response.DatabaseId }, response);
     }

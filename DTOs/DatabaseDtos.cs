@@ -14,6 +14,18 @@ public class CreateDatabaseRequest
 
     [Required, MaxLength(128)]
     public string DbName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Tope de conexiones simultáneas para el usuario/login de esta BD.
+    /// Opcional — si se omite, se usa el default del motor
+    /// (<c>Provisioning:{Engine}:MaxConcurrentConnections</c>). El backend
+    /// SIEMPRE lo acota a <c>Provisioning:{Engine}:MaxConcurrentConnectionsCap</c>
+    /// sin importar lo que pida el cliente, para que esto no deje de ser un
+    /// control de abuso. Solo tiene efecto real en motores con soporte nativo
+    /// (MySQL, Postgres); en SqlServer/Mongo se ignora (ver docs/bugs.md).
+    /// </summary>
+    [Range(1, 100)]
+    public int? MaxConcurrentConnections { get; set; }
 }
 
 /// <summary>
@@ -27,6 +39,13 @@ public class CreateDatabaseResponse
     public string DbName { get; set; } = string.Empty;
     public string Status { get; set; } = "Active";
     public int MaxStorageMB { get; set; }
+
+    /// <summary>
+    /// Tope de conexiones simultáneas efectivamente aplicado (ya acotado al
+    /// cap del motor, puede diferir de lo pedido en el request). 0 en motores
+    /// sin soporte nativo (SqlServer, Mongo) — ver docs/bugs.md ítem 12.
+    /// </summary>
+    public int MaxConcurrentConnections { get; set; }
 
     // A dónde conectarse.
     public string Host { get; set; } = string.Empty;

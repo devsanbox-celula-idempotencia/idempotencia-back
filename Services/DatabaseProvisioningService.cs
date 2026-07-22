@@ -13,23 +13,35 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
 {
     private readonly IDatabaseRepository _repo;
     private readonly IDatabaseProvisionerFactory _factory;
+    private readonly IConfiguration _config;
     private readonly ILogger<DatabaseProvisioningService> _logger;
 
     public DatabaseProvisioningService(
         IDatabaseRepository repo,
         IDatabaseProvisionerFactory factory,
+        IConfiguration config,
         ILogger<DatabaseProvisioningService> logger)
     {
         _repo = repo;
         _factory = factory;
+        _config = config;
         _logger = logger;
     }
 
     public async Task<CreateDatabaseResponse> ProvisionAsync(
-        int userId, string engine, string dbName, CancellationToken ct = default)
+        int userId, string engine, string dbName,
+        int? requestedMaxConcurrentConnections = null, CancellationToken ct = default)
     {
         // 1. Valida que el motor esté soportado (400 si no) ANTES de tocar la DB.
         var provisioner = _factory.Get(engine);
+
+        // 1b. Resuelve el tope de conexiones concurrentes: si el cliente pidió
+        // uno, se acota SIEMPRE al cap del motor (nunca se confía en lo que
+        // pide el cliente sin límite); si no pidió nada, se usa el default del
+        // motor. En motores sin soporte nativo (SqlServer/Mongo) el provisioner
+        // simplemente ignora este valor.
+        var effectiveMaxConcurrentConnections =
+            ResolveMaxConcurrentConnections(engine, requestedMaxConcurrentConnections);
 
         // 2. Reserva en el catálogo: el SP valida cuota/límites y genera nombres.
         var reservation = await _repo.ReserveDatabaseAsync(userId, engine, dbName, ct);
@@ -41,7 +53,8 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         {
             // 4. Creación física en el motor correspondiente.
             var result = await provisioner.CreateAsync(
-                reservation.DbName, reservation.LoginName, password, reservation.MaxStorageMB, ct);
+                reservation.DbName, reservation.LoginName, password, reservation.MaxStorageMB,
+                effectiveMaxConcurrentConnections, ct);
 
             // 5. Confirma en el catálogo y guarda el HASH de la contraseña.
             var passwordHash = BCrypt.Net.BCrypt.HashPassword(password);
@@ -54,6 +67,7 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
                 DbName = reservation.DbName,
                 Status = "Active",
                 MaxStorageMB = reservation.MaxStorageMB,
+                MaxConcurrentConnections = effectiveMaxConcurrentConnections,
                 Host = result.Host,
                 Port = result.Port,
                 LoginName = reservation.LoginName,
@@ -87,5 +101,29 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
 
             throw; // se propaga al middleware para la respuesta de error uniforme
         }
+    }
+
+    /// <summary>
+    /// Lee <c>Provisioning:{Engine}:MaxConcurrentConnections</c> (default,
+    /// usado si el cliente no pidió nada) y
+    /// <c>Provisioning:{Engine}:MaxConcurrentConnectionsCap</c> (tope duro) de
+    /// configuración, y devuelve el valor final ya acotado. El cliente NUNCA
+    /// puede superar el cap sin importar lo que pida — de lo contrario este
+    /// control de abuso quedaría en manos del propio usuario que se quiere
+    /// limitar.
+    /// </summary>
+    private int ResolveMaxConcurrentConnections(string engine, int? requested)
+    {
+        var defaultValue =
+            int.TryParse(_config[$"Provisioning:{engine}:MaxConcurrentConnections"], out var d) ? d : 5;
+        var cap =
+            int.TryParse(_config[$"Provisioning:{engine}:MaxConcurrentConnectionsCap"], out var c) ? c : 20;
+
+        var requestedOrDefault = requested ?? defaultValue;
+
+        if (requestedOrDefault < 1) requestedOrDefault = 1;
+        if (requestedOrDefault > cap) requestedOrDefault = cap;
+
+        return requestedOrDefault;
     }
 }

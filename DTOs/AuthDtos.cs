@@ -34,4 +34,30 @@ public class AuthResponse
     public string Email { get; set; } = string.Empty;
     public string FullName { get; set; } = string.Empty;
     public string Role { get; set; } = "Student";
+
+    /// <summary>
+    /// Credenciales de la BD MySQL aprovisionada automáticamente la primera vez
+    /// que este usuario inicia sesión (register/login/OAuth). Solo viene
+    /// poblado en el login donde se creó — la contraseña no se puede recuperar
+    /// después, igual que en <c>POST /databases</c>. Null si el usuario ya
+    /// tenía una BD MySQL o si el aprovisionamiento automático falló (el login
+    /// no se bloquea por esto; ver logs del backend).
+    /// </summary>
+    public ProvisionedDatabaseCredentials? MySqlDatabase { get; set; }
+}
+
+/// <summary>
+/// Credenciales de conexión de una BD recién aprovisionada, entregadas una
+/// única vez (mismo shape que <see cref="CreateDatabaseResponse"/>, para no
+/// duplicar significado entre el flujo manual y el automático).
+/// </summary>
+public class ProvisionedDatabaseCredentials
+{
+    public int DatabaseId { get; set; }
+    public string Engine { get; set; } = string.Empty;
+    public string DbName { get; set; } = string.Empty;
+    public string Host { get; set; } = string.Empty;
+    public int Port { get; set; }
+    public string LoginName { get; set; } = string.Empty;
+    public string Password { get; set; } = string.Empty;
 }

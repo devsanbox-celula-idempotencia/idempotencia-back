@@ -36,6 +36,7 @@ builder.Services.AddDbContext<ColmenaDbContext>(options =>
 
 builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<IDatabaseRepository, DatabaseRepository>();
+builder.Services.AddScoped<IStatisticsRepository, StatisticsRepository>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 builder.Services.AddSingleton<IOAuthRedirectBuilder, OAuthRedirectBuilder>();
@@ -102,17 +103,26 @@ builder.Services.AddOpenApi(options =>
 
 // ---------------------------------------------------------------------------
 // CORS: orígenes permitidos del frontend (pruebas locales y despliegue).
-// Los orígenes no llevan barra final; el navegador compara el Origin exacto.
+// Vienen de appsettings.json (Cors:AllowedOrigins) en vez de hardcodeados, así
+// se pueden agregar/quitar orígenes por ambiente (appsettings.Development.json,
+// variables de entorno, etc.) sin tocar código. Los orígenes no llevan barra
+// final; el navegador compara el Origin exacto.
 // ---------------------------------------------------------------------------
 const string FrontendCorsPolicy = "FrontendCors";
+var corsAllowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
+    ?? Array.Empty<string>();
+
+if (corsAllowedOrigins.Length == 0)
+{
+    throw new InvalidOperationException(
+        "Falta configurar Cors:AllowedOrigins en appsettings.json (al menos un origen).");
+}
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy(FrontendCorsPolicy, policy =>
     {
-        policy.WithOrigins(
-                "http://localhost:5555",       // front en pruebas (HTTP)
-                "https://localhost:5555",       // front en pruebas (HTTPS, por si aplica)
-                "https://idempotencia.andrescortes.dev") // despliegue
+        policy.WithOrigins(corsAllowedOrigins)
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
@@ -126,6 +136,7 @@ builder.Services.AddCors(options =>
 // que habilitar ForwardedHeaders para que la IP real llegue correctamente.
 // ---------------------------------------------------------------------------
 const string AuthRateLimitPolicy = "auth";
+const string DbProvisioningRateLimitPolicy = "db-provisioning";
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -139,6 +150,22 @@ builder.Services.AddRateLimiter(options =>
                 PermitLimit = 10,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0 // sin cola: al superar el límite, se rechaza de una
+            }));
+
+    // Política para POST /databases: crear BDs físicas es costoso (conecta al
+    // motor real, ejecuta DDL). Se particiona por UserId (claim del JWT) en vez
+    // de IP, porque el endpoint ya requiere autenticación y el abuso relevante
+    // es "un usuario crea BDs en bucle", no solo una IP. 5 creaciones/min es
+    // generoso para uso normal (el login ya crea la primera automáticamente).
+    options.AddPolicy(DbProvisioningRateLimitPolicy, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.User.FindFirst("UserId")?.Value
+                ?? httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 5,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
             }));
 
     // Límite global por IP para el resto de la API: 100 peticiones/min.

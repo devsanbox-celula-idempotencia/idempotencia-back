@@ -13,10 +13,15 @@ public interface IDatabaseProvisioner
     /// <summary>Motor que maneja esta implementación (ver <see cref="DatabaseEngine"/>).</summary>
     string Engine { get; }
 
-    /// <summary>Crea físicamente la BD + usuario con permisos en el motor.</summary>
+    /// <summary>
+    /// Crea físicamente la BD + usuario con permisos en el motor.
+    /// <paramref name="maxConcurrentConnections"/> ya viene resuelto (default
+    /// aplicado si el cliente no pidió uno, acotado al cap del motor) —
+    /// los provisioners sin soporte nativo para esto simplemente lo ignoran.
+    /// </summary>
     Task<ProvisionResult> CreateAsync(
         string dbName, string login, string password, int maxStorageMb,
-        CancellationToken ct = default);
+        int maxConcurrentConnections, CancellationToken ct = default);
 
     /// <summary>Elimina la BD + usuario (usado para revertir un aprovisionamiento fallido).</summary>
     Task DropAsync(string dbName, string login, CancellationToken ct = default);

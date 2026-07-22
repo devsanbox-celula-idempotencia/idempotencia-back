@@ -34,8 +34,12 @@ public class SqlServerProvisioner : IDatabaseProvisioner
     }
 
     public async Task<ProvisionResult> CreateAsync(
-        string dbName, string login, string password, int maxStorageMb, CancellationToken ct = default)
+        string dbName, string login, string password, int maxStorageMb,
+        int maxConcurrentConnections, CancellationToken ct = default)
     {
+        // maxConcurrentConnections: SQL Server no tiene un límite nativo por
+        // login (se ignora aquí a propósito). Ver docs/bugs.md ítem 12 para la
+        // propuesta con logon trigger, no aplicada todavía.
         var db = QuoteIdentifier(dbName);
         var lg = QuoteIdentifier(login);
 
@@ -51,6 +55,15 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         // 2. Login a nivel servidor. QuoteLiteral escapa la contraseña como literal.
         await ExecAsync(conn,
             $"CREATE LOGIN {lg} WITH PASSWORD = {QuoteLiteral(password)}, CHECK_POLICY = OFF;", ct);
+
+        // 2b. Sin esto, CUALQUIER login puede ver los nombres de TODAS las BDs
+        // del servidor en sys.databases / Object Explorer de SSMS (comportamiento
+        // por defecto de SQL Server), aunque no pueda entrar a ellas. En un
+        // servidor multi-inquilino (una BD por estudiante) eso ya es una fuga de
+        // información no aceptable. DENY VIEW ANY DATABASE oculta las BDs a las
+        // que este login no tiene acceso explícito; sigue viendo master/tempdb y
+        // la suya propia.
+        await ExecAsync(conn, $"DENY VIEW ANY DATABASE TO {lg};", ct);
 
         // 3. Usuario dentro de la BD + db_owner sobre SU BD. USE dentro de EXEC
         //    porque no se puede cambiar de BD en una conexión ya abierta.
