@@ -3,23 +3,20 @@ using System.ComponentModel.DataAnnotations;
 namespace idempotencia.DTOs;
 
 /// <summary>Datos de entrada para el registro por contraseña.</summary>
-public class RegisterRequest
+public class RegisterRequest : IValidatableObject
 {
     private string _email = string.Empty;
     private string _fullName = string.Empty;
 
-    // [EmailAddress] ya valida el formato general; el [RegularExpression]
-    // adicional es más estricto a propósito (exige exactamente un "@" y un
-    // "." en el dominio, sin espacios) — defensa en profundidad ante formatos
-    // "técnicamente válidos" pero claramente mal escritos (ej. "a@b@c",
-    // "a@b."). El valor ya llega trimeado/en minúsculas por el setter de
-    // abajo, así que un correo con mayúsculas o espacios de más no genera un
-    // 400 innecesario ni crea una cuenta "distinta" por una diferencia
-    // cosmética.
-    [Required(ErrorMessage = "El correo es obligatorio.")]
-    [EmailAddress(ErrorMessage = "El correo no tiene un formato válido.")]
-    [RegularExpression(@"^[^@\s]+@[^@\s]+\.[^@\s]+$", ErrorMessage = "El correo no tiene un formato válido.")]
-    [MaxLength(150)]
+    // Sin [EmailAddress]/[RegularExpression]/[MaxLength] apilados a propósito
+    // — esa combinación causó un bug real (400 en un correo de exactamente
+    // 150 caracteres, el máximo documentado: dos validadores independientes
+    // sobre el mismo campo no garantizan coincidir en el límite exacto). El
+    // formato y la longitud se validan en un solo lugar, en Validate() más
+    // abajo, usando InputNormalization como único punto de verdad. El valor
+    // ya llega trimeado/en minúsculas por el setter, así que un correo con
+    // mayúsculas o espacios de más no genera un 400 innecesario ni crea una
+    // cuenta "distinta" por una diferencia cosmética.
     public string Email
     {
         get => _email;
@@ -28,9 +25,12 @@ public class RegisterRequest
 
     // A propósito NO se trimea/normaliza: un espacio en la contraseña puede
     // ser intencional y parte de la clave real del usuario.
+    // Límite máximo bajado de 100 a 12 (requisito de negocio confirmado,
+    // ver docs/bugs.md ítem 21) — ¡ojo!, deja un rango angosto (8-12), no
+    // aumentar el mínimo sin volver a confirmar el rango con el equipo.
     [Required(ErrorMessage = "La contraseña es obligatoria.")]
     [MinLength(8, ErrorMessage = "La contraseña debe tener al menos 8 caracteres.")]
-    [MaxLength(100)]
+    [MaxLength(12, ErrorMessage = "La contraseña no puede superar los 12 caracteres.")]
     public string Password { get; set; } = string.Empty;
 
     // Letras (incluye acentos/ñ vía \p{L}), espacios, apóstrofes, guiones y
@@ -46,17 +46,16 @@ public class RegisterRequest
         get => _fullName;
         set => _fullName = InputNormalization.CollapseSpaces(value);
     }
+
+    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext) =>
+        EmailValidation.Validate(Email, nameof(Email));
 }
 
 /// <summary>Datos de entrada para el login por contraseña.</summary>
-public class LoginRequest
+public class LoginRequest : IValidatableObject
 {
     private string _email = string.Empty;
 
-    [Required(ErrorMessage = "El correo es obligatorio.")]
-    [EmailAddress(ErrorMessage = "El correo no tiene un formato válido.")]
-    [RegularExpression(@"^[^@\s]+@[^@\s]+\.[^@\s]+$", ErrorMessage = "El correo no tiene un formato válido.")]
-    [MaxLength(150)]
     public string Email
     {
         get => _email;
@@ -65,6 +64,40 @@ public class LoginRequest
 
     [Required(ErrorMessage = "La contraseña es obligatoria.")]
     public string Password { get; set; } = string.Empty;
+
+    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext) =>
+        EmailValidation.Validate(Email, nameof(Email));
+}
+
+/// <summary>
+/// Validación de <c>Email</c> compartida por <see cref="RegisterRequest"/> y
+/// <see cref="LoginRequest"/> — un solo lugar, tres reglas explícitas
+/// (obligatorio, longitud, formato), cada una con su propio mensaje. Ver el
+/// comentario en <see cref="InputNormalization"/> sobre por qué esto ya no
+/// vive en atributos apilados.
+/// </summary>
+internal static class EmailValidation
+{
+    public static IEnumerable<ValidationResult> Validate(string email, string memberName)
+    {
+        if (string.IsNullOrEmpty(email))
+        {
+            yield return new ValidationResult("El correo es obligatorio.", new[] { memberName });
+            yield break; // sin valor, no tiene sentido evaluar longitud/formato
+        }
+
+        if (!InputNormalization.IsWithinMaxEmailLength(email))
+        {
+            yield return new ValidationResult(
+                $"El correo no puede superar los {InputNormalization.MaxEmailLength} caracteres.",
+                new[] { memberName });
+        }
+
+        if (!InputNormalization.IsValidEmailFormat(email))
+        {
+            yield return new ValidationResult("El correo no tiene un formato válido.", new[] { memberName });
+        }
+    }
 }
 
 /// <summary>Respuesta estándar de autenticación con el JWT emitido.</summary>

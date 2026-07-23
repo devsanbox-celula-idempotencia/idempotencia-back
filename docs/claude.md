@@ -401,45 +401,237 @@ real** (ninguno lo puede hacer el backend solo):
 
 Después de eso, confirmar en vivo los 4 endpoints.
 
+## Sesión 8 — 2026-07-22 (dos bugs de validación reportados por QA: email de 150 y contraseña máx. 12 — registrados en la bitácora)
+
+**Contexto:** al correr esta tarea programada de mantenimiento de
+documentación, se encontró que `docs/bugs.md` ya tenía los ítems 20 y 21
+completamente escritos (con estado 🟢 Resuelto) y que `docs/API.md`,
+`README.md` y las guías de Docusaurus ya reflejaban ambos fixes — pero nunca
+se agregó una entrada a esta bitácora para esa sesión de trabajo. Se
+completa acá el registro correspondiente, sin tocar código (ya estaba
+aplicado) ni el resto de los docs (ya estaban al día).
+
+**Qué se hizo (en la sesión original, reconstruido de `bugs.md`):**
+
+1. **Ítem 20 — `POST /auth/register` rechazaba un correo de exactamente 150
+   caracteres** (el máximo documentado): tres validadores independientes
+   apilados sobre `Email` (`[EmailAddress]`, `[RegularExpression]`,
+   `[MaxLength(150)]`) no garantizaban coincidir exactamente en el límite.
+   Se centralizó la validación en `RegisterRequest`/`LoginRequest` vía
+   `IValidatableObject` + una clase interna `EmailValidation` (reglas
+   explícitas: obligatorio, longitud, formato), apoyada en dos métodos
+   nuevos de `DTOs/InputNormalization.cs`
+   (`IsWithinMaxEmailLength`/`IsValidEmailFormat`).
+2. **Ítem 21 — `POST /auth/register` aceptaba contraseñas de más de 12
+   caracteres**, reportado por un ticket de QA con grabación adjunta. El
+   requisito de negocio real es 8–12 caracteres, pero el código tenía
+   `[MaxLength(100)]`. Se corrigió a `[MaxLength(12)]` en
+   `RegisterRequest.Password`. A propósito no se tocó `LoginRequest.Password`
+   (el login no debe re-validar longitud contra la política vigente de
+   registro, para no bloquear cuentas creadas bajo un límite anterior).
+3. **Docs actualizados en esa sesión** (confirmado, ya estaban así al
+   iniciar esta tarea programada): `docs/API.md` (§5.1), `README.md` (tabla
+   de errores de `/auth/register`), `docusaurus-docs/03-api-referencia.md` e
+   `idempotencia-back-docusaurus.md` — todos decían "8–100 caracteres" para
+   la contraseña, ahora dicen "8–12".
+
+**Qué se hizo en esta corrida de la tarea programada:** solo se agregó esta
+entrada a `docs/claude.md` para cerrar el registro; `docs/routes.md` y
+`docs/API.md` ya estaban sincronizados con `Controllers/` (sin cambios de
+rutas), y el resto de los ítems de `bugs.md` se revisaron contra el código
+fuente actual sin encontrar más cambios de estado verificables sin acceso a
+la BD real.
+
+**Pendiente:** nada nuevo — ver "Backlog / próximos pasos" (sin cambios
+respecto a la sesión 7).
+
+---
+
+## Sesión 9 — 2026-07-23 (corrida automática de mantenimiento de documentación — hallazgo: falta el script SQL del ciclo de vida)
+
+**Contexto:** corrida programada de `idempotencia-docs-sync`. Se comparó
+`Controllers/` contra `docs/routes.md`/`docs/API.md` (los 13 endpoints de
+negocio y sus atributos de auth/rate-limit coinciden exactamente con el
+código actual — sin cambios) y se revisó cada ítem de `docs/bugs.md` contra
+el código fuente donde era verificable sin acceso a la BD real.
+
+**Qué se encontró:** el archivo
+[`sql/2026-07-22_database_lifecycle_sps.sql`](../sql/2026-07-22_database_lifecycle_sps.sql),
+referenciado desde `docs/bugs.md` (ítem 19) y `docs/routes.md` (hallazgo 11)
+como el script pendiente de desplegar para los 4 SPs del ciclo de vida manual
+de bases de datos, **no existe en el repositorio conectado** — no hay
+carpeta `sql/` en el disco, y no está en `.gitignore` (a diferencia de
+`appsettings.json`), así que no es un caso de "archivo local no versionado a
+propósito": simplemente no está presente. No se puede saber desde esta tarea
+si ya se aplicó y se borró, si nunca se guardó como archivo (solo se mostró
+en el chat de otra sesión), o si se perdió. Se documentó como actualización
+del ítem 19 en `bugs.md` y una nota en el hallazgo 11 de `routes.md`,
+pidiendo confirmación en el chat.
+
+**Verificaciones que confirmaron que nada más cambió de estado** (código
+leído, sin necesidad de BD real): `Program.cs` mantiene `UseForwardedHeaders`
+(ítem 17 sigue en 🟡, pendiente de confirmación en QA, no en 🔴); `AuthService.cs`
+mantiene el mensaje genérico único en `LoginAsync` (ítem 14, 🟢) y no llama
+`EnsureMySqlDatabaseAsync` desde `ExternalLoginAsync` (ítem 16, 🟢);
+`DTOs/AuthDtos.cs` mantiene `MaxLength(12)` en `Password` y la validación
+centralizada de `Email` vía `IValidatableObject` (ítems 20 y 21, 🟢);
+`Provisioners/SqlServerProvisioner.cs` y `PostgresProvisioner.cs` mantienen
+`DENY VIEW ANY DATABASE` / `REVOKE CONNECT`+`GRANT CONNECT` (ítem 13, sigue
+🔵 parcial — MySQL sigue sin equivalente); no existe ningún `IHostedService`/
+`BackgroundService` en el proyecto (ítem 11, TTL, sigue 🔴 abierto);
+`Data/ColmenaDbContext.cs` sigue sin `HasColumnType` para `CurrentSizeMB`
+(ítem 5, sigue 🔴). El ítem 9 (`sp_GetLoginByEmail`/`Roles`) y cualquier otro
+hallazgo que dependa de ejecutar SQL contra la base real **no se tocó**, tal
+como indica la regla de esta tarea programada.
+
+**Nota sobre `appsettings.json`:** el archivo presente en el repositorio
+conectado está vacío (solo el BOM, 3 bytes) en esta corrida — no se pudo usar
+para verificar nada de la sección `Cors`/`Email`/connection strings. No se
+registra como hallazgo nuevo porque ya se sabe (ítem 3 de `bugs.md`) que este
+archivo vive fuera de git por diseño (secretos reales) y su contenido real
+solo existe en la máquina del usuario; probablemente no llegó completo a este
+entorno de análisis por la misma razón que ya limita la conectividad SQL
+directa (ver notas de conectividad en `routes.md`).
+
+**Pendiente:** confirmar en el chat si el script SQL del ciclo de vida ya se
+aplicó contra la BD real (para poder mover el ítem 19 a 🟢) o si hay que
+regenerarlo; el resto del backlog no cambia respecto a la sesión 8.
+
+---
+
+## Sesión 10 — 2026-07-23 (corrida automática de mantenimiento de documentación — hallazgo: SMTP ya configurado)
+
+**Contexto:** otra corrida programada de `idempotencia-docs-sync` el mismo
+día que la sesión 9. Se repitió la comparación de `Controllers/` contra
+`docs/routes.md`/`docs/API.md` (los 13 endpoints y sus atributos de
+auth/rate-limit siguen coincidiendo exactamente — sin cambios de rutas) y se
+revisó `docs/bugs.md` ítem por ítem contra el código/config fuente donde era
+verificable sin acceso a la BD real. `git status` mostraba casi todo el árbol
+como "modified", pero `git diff` confirmó que es solo ruido de fin de línea
+(CRLF/LF) sobre el mismo contenido del último commit — no hay cambios de
+código reales en esta corrida.
+
+**Qué se encontró:** `appsettings.json` en el repositorio conectado ya no
+tiene placeholders en la sección `Email` — tiene una cuenta SMTP real de
+Gmail configurada (`smtp.gmail.com`, usuario y una contraseña con formato de
+App Password). Esto resuelve uno de los dos pasos manuales pendientes del
+ítem 19 de `bugs.md` (ciclo de vida manual de bases de datos): el paso de
+"configurar SMTP" ya está hecho; solo sigue faltando desplegar los 4 Stored
+Procedures (`sql/2026-07-22_database_lifecycle_sps.sql` sigue sin existir en
+el repo, ver sesión 9). Se actualizaron `docs/bugs.md` (ítem 19 y su
+checklist de "Pendiente", ítem 3 con la mención del nuevo secreto en texto
+plano), `docs/routes.md` (hallazgo 11) y `docs/API.md` (§10, fila de
+`reset-password`) para reflejarlo.
+
+**Verificaciones que confirmaron que nada más cambió de estado** (código
+leído, sin necesidad de BD real): `Program.cs` sigue con `UseForwardedHeaders`
+(ítem 17, sigue 🟡); `AuthController.cs` sigue sin `[EnableRateLimiting]` en
+los 4 endpoints OAuth (ítem 2, sigue 🔴); el claim `"UserId"` sigue como
+string literal duplicado en `DatabasesController.cs` y `JwtTokenService.cs`
+(ítem 7, sigue 🔴); `ColmenaDbContext.cs` sigue sin `HasColumnType` para
+`CurrentSizeMB` (ítem 5, sigue 🔴); no existe ningún `IHostedService`/
+`BackgroundService` en el proyecto (ítem 11, TTL, sigue 🔴 abierto). El ítem 9
+(`sp_GetLoginByEmail`/`Roles`) y cualquier otro hallazgo que dependa de
+ejecutar SQL contra la base real no se tocó.
+
+**Pendiente:** desplegar los 4 SPs del ciclo de vida de bases de datos
+(único paso manual que falta para el ítem 19) y confirmar en vivo esos 4
+endpoints; el resto del backlog no cambia respecto a la sesión 9.
+
+---
+
+## Sesión 11 — 2026-07-23 (fixes rápidos verificables sin BD + confirmación de 17 y 19)
+
+**Pedido:** revisar el proyecto tomando el contexto de los `.md`, explicar los
+hallazgos abiertos y hacer un lote de "fixes rápidos" confirmando cuáles son
+errores reales. El usuario confirmó además que los ítems 17 y 19 de `bugs.md`
+ya quedaron listos.
+
+**Verificación previa (errores reales confirmados contra el código fuente):**
+se leyeron `Controllers/AuthController.cs`, `Controllers/DatabasesController.cs`,
+`Services/JwtTokenService.cs`, `Program.cs`, `Data/ColmenaDbContext.cs`,
+`Models/ProvisionedDatabaseInfo.cs`, `Models/ProvisionedDatabaseDetail.cs`,
+`idempotencia.csproj`, `idempotencia.http` y `OpenApi/BearerSecuritySchemeTransformer.cs`.
+Los 5 hallazgos elegidos (ítems 2, 4, 5, 6, 7) se confirmaron como reales y
+presentes en el código actual antes de tocar nada.
+
+**Qué se hizo (fixes aplicados):**
+
+1. **Ítem 6 (🟢) — `idempotencia.http`**: se reemplazó el único `GET /weatherforecast/`
+   (resto de la plantilla de .NET) por peticiones reales a los 13 endpoints de
+   negocio, con variable `@token` que reutiliza el JWT del login.
+2. **Ítem 5 (🟢) — `CurrentSizeMB` sin tipo**: se agregó
+   `HasColumnType("decimal(10,2)")` en `Data/ColmenaDbContext.cs` para
+   `ProvisionedDatabaseInfo` y `ProvisionedDatabaseDetail` (ambos exponen el
+   decimal). Elimina el warning de truncamiento silencioso de EF Core.
+3. **Ítem 7 (🟢) — claim `"UserId"` literal duplicado**: se creó
+   `Services/JwtClaimNames.cs` (`JwtClaimNames.UserId`) y se reemplazó el
+   string literal en los 3 lugares que lo usaban (`JwtTokenService`,
+   `DatabasesController`, la partición del rate limiter en `Program.cs`).
+4. **Ítem 2 (🟢) — rate limit dedicado en OAuth**: nueva política `oauth`
+   (20/min por IP) en `Program.cs` + `[EnableRateLimiting("oauth")]` en los 4
+   endpoints OAuth de `AuthController`. Se prefirió una política propia en vez
+   de reusar `auth` (10/min) para no mezclar la partición con login/registro.
+5. **Ítem 4 (🟡) — `Microsoft.OpenApi` vulnerable (NU1903 / GHSA-v5pm-xwqc-g5wc)**:
+   se agregó un `PackageReference` explícito a `Microsoft.OpenApi` **2.7.5**
+   (primera versión parcheada de la línea 2.x) en `idempotencia.csproj`, que
+   sobrescribe la 2.0.0 transitiva. Se verificó que la API usada por
+   `BearerSecuritySchemeTransformer` sigue presente en 2.7.5. Queda 🟡 porque
+   confirmar que el aviso desaparece requiere `dotnet restore` +
+   `dotnet list package --vulnerable`, que no se pudo correr en esta sesión.
+
+6. **Ítems 17 y 19 → 🟢 (confirmados por el usuario):** el usuario confirmó que
+   el `redirect_uri_mismatch` de OAuth en QA (ítem 17) ya no ocurre tras
+   desplegar, y que los 4 Stored Procedures del ciclo de vida manual (ítem 19)
+   ya están desplegados contra la BD real y sus 4 endpoints funcionan de punta
+   a punta. Se actualizaron sus estados en `bugs.md`, `routes.md` y `API.md`.
+
+**Limitación importante de esta sesión:** el entorno de análisis **no tiene el
+SDK de .NET ni salida de red al instalador**, así que **no se pudo compilar ni
+arrancar la app**. Los fixes 2/5/6/7 se verificaron por lectura del código
+(son cambios estándar y de bajo riesgo) y el ítem 4 por lectura + consulta del
+aviso de seguridad. **Antes de dar por cerrados 2/4/5/7, correr un
+`dotnet build` (y para el 4, `dotnet list package --vulnerable`) en la máquina
+del usuario.**
+
+**Docs actualizados:** `docs/bugs.md` (ítems 2, 4, 5, 6, 7 con solución
+aplicada + estados; 17 y 19 a 🟢; tabla resumen), `docs/routes.md` (columna de
+rate limit de los 4 endpoints OAuth + hallazgo 12 nuevo + estados 17/19),
+`docs/API.md` (§5.3 nota de rate limit OAuth, §10 endpoints de ciclo de vida a
+desplegados/confirmados) y esta bitácora.
+
+---
+
 ## Backlog / próximos pasos
 
-1. **Desplegar `sql/2026-07-22_database_lifecycle_sps.sql`** contra la BD
-   real (`sp_GetDatabaseDetail`, `sp_DeactivateDatabase`, `sp_DeleteDatabase`,
-   `sp_ResetDatabasePassword`) y confirmar que `ProvisionedDatabases` tiene
-   columna `LoginName` (ver notas del script) — sin esto los 4 endpoints
-   nuevos de la sesión 7 devuelven `500`.
-2. **Configurar la sección `Email` de `appsettings.json`** con una cuenta
-   SMTP real (App Password de Google u otro proveedor) para que
-   `POST /databases/{id}/reset-password` pueda enviar correos — hoy tiene
-   placeholders. Idealmente vía User Secrets/variables de entorno.
-3. **Confirmar en vivo los 4 endpoints nuevos** (detalle, desactivar,
-   eliminar, reset de contraseña) tras los dos pasos anteriores — ítem 19 de
-   `bugs.md`, mover de 🟡 a 🟢.
-4. **Confirmar en vivo el fix del ítem 17** (`redirect_uri_mismatch` en QA)
-   tras desplegar — mover de 🟡 a 🟢 en `bugs.md`.
-5. **Confirmar en vivo el fix de `sp_UpsertExternalLogin`** (ítem 9) tras
-   aplicar el `ALTER PROCEDURE` en la BD real — probar un login OAuth
-   completo de punta a punta.
-6. **Evaluar bajar el `MaxLength` de `CreateDatabaseRequest.DbName`** (hoy
-   128) para dejar margen bajo el límite de identificador de 64 caracteres
-   de MySQL una vez concatenado el prefijo por usuario.
-7. **Ciclo de vida automático (TTL)**: implementar `sp_GetIdleDatabases` +
+1. **Confirmar la compilación tras los fixes de la sesión 11**: correr
+   `dotnet build` en la máquina del usuario para validar los ítems 2/5/7 (se
+   aplicaron sin poder compilar en el entorno de la sesión) y, para el ítem 4,
+   `dotnet restore` + `dotnet list package --vulnerable` para confirmar que el
+   aviso `NU1903` de `Microsoft.OpenApi` desaparece con el pin a 2.7.5 (mover
+   el ítem 4 de 🟡 a 🟢).
+2. **Confirmar en vivo el fix de `sp_UpsertExternalLogin`** (ítem 9) tras
+   aplicar el `ALTER PROCEDURE` en la BD real — probar un login OAuth completo
+   de punta a punta.
+3. **Evaluar bajar el `MaxLength` de `CreateDatabaseRequest.DbName`** (hoy
+   128) para dejar margen bajo el límite de identificador de 64 caracteres de
+   MySQL una vez concatenado el prefijo por usuario.
+4. **Ciclo de vida automático (TTL)**: implementar `sp_GetIdleDatabases` +
    `DatabaseLifecycleJob` (`IHostedService`) que detecte inactividad y
-   reutilice `sp_DeactivateDatabase`/`sp_DeleteDatabase` (ya existen desde la
-   sesión 7) en vez de crear SPs nuevas con otro nombre — ítem 11 de
-   `bugs.md`, actualizado para no duplicar los SPs manuales.
-8. **Endpoint de "reactivar" una BD desactivada** (`ENABLE`/`ACCOUNT UNLOCK`/
-   `LOGIN` según el motor) — no se pidió en la sesión 7, hoy desactivar es
-   unidireccional hacia eliminar.
-9. **Cuota de almacenamiento real** para Postgres/MySQL/Mongo — ítem 10 de
+   reutilice `sp_DeactivateDatabase`/`sp_DeleteDatabase` (ya desplegados) en
+   vez de crear SPs nuevas — ítem 11 de `bugs.md`.
+5. **Endpoint de "reactivar" una BD desactivada** (`ENABLE`/`ACCOUNT UNLOCK`/
+   `LOGIN` según el motor) — hoy desactivar es unidireccional hacia eliminar.
+6. **Cuota de almacenamiento real** para Postgres/MySQL/Mongo — ítem 10 de
    `bugs.md`.
-10. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
-    ítem 12 de `bugs.md`.
-11. Token JWT (y PII) viaja en query string en el redirect OAuth — ítems 1 y
-    15 de `bugs.md`.
-12. Secretos reales en texto plano en `appsettings.json` — ítem 3 de
-    `bugs.md`.
-13. Vulnerabilidad conocida en `Microsoft.OpenApi` — ítem 4 de `bugs.md`.
-14. Sin rate limit dedicado en los 4 endpoints OAuth — ítem 2 de `bugs.md`.
-15. `CurrentSizeMB` sin tipo de columna explícito en EF Core — ítem 5 de
-    `bugs.md`.
+7. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
+   ítem 12 de `bugs.md`.
+8. **Token JWT (y PII) en query string del redirect OAuth** — ítems 1 y 15 de
+   `bugs.md` (mismo fix: intercambio por código de un solo uso).
+9. **Secretos reales en texto plano en `appsettings.json`** (incluye las
+   credenciales SMTP de la sección `Email`) — ítem 3 de `bugs.md`.
+
+**Resueltos en la sesión 11 (salen del backlog):** desplegar los SPs del ciclo
+de vida y confirmar sus 4 endpoints (ítem 19), confirmar el fix del ítem 17,
+rate limit OAuth (ítem 2), `CurrentSizeMB` sin tipo (ítem 5), claim `UserId`
+duplicado (ítem 7), `idempotencia.http` obsoleto (ítem 6).

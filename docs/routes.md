@@ -28,10 +28,10 @@
 |---|---|---|---|---|---|
 | POST | `/auth/register` | Anónimo | `auth` (10/min/IP) | ⚠️ Código completo; depende de `sp_RegisterUser` (confirmado en vivo, sin bug de `Roles`) | Hashea password con BCrypt en backend, el SP solo persiste. **Además dispara auto-aprovisionamiento de BD MySQL** (ver hallazgo 5). |
 | POST | `/auth/login` | Anónimo | `auth` (10/min/IP) | ✅ Confirmado en vivo | Bug de `sp_GetLoginByEmail` corregido (`bugs.md` ítem 9). Enumeración de cuentas OAuth-only corregida (`bugs.md` ítem 14). **Además dispara auto-aprovisionamiento de BD MySQL** (ver hallazgo 5). |
-| GET | `/auth/google/login` | Anónimo | Solo global (100/min/IP) | ✅ Funcional | Redirige (`Challenge`) al flujo OAuth de Google. Credenciales configuradas en `appsettings.json`. |
-| GET | `/auth/google/callback` | Anónimo (cookie `External`) | Solo global | ⚠️ Código completo; depende de `sp_UpsertExternalLogin` (sin confirmar en vivo) | Ver hallazgo sobre PII+token en query string en `bugs.md` ítems 1 y 15. **YA NO dispara auto-aprovisionamiento de BD MySQL** (removido, ver hallazgo 9) — el frontend debe pedirla explícitamente. |
-| GET | `/auth/github/login` | Anónimo | Solo global (100/min/IP) | ✅ Funcional | Redirige al flujo OAuth de GitHub. |
-| GET | `/auth/github/callback` | Anónimo (cookie `External`) | Solo global | ⚠️ Código completo; depende de `sp_UpsertExternalLogin` (sin confirmar en vivo) | Igual que Google callback — sin auto-aprovisionamiento (hallazgo 9). |
+| GET | `/auth/google/login` | Anónimo | `oauth` (20/min/IP) | ✅ Funcional | Redirige (`Challenge`) al flujo OAuth de Google. Credenciales configuradas en `appsettings.json`. |
+| GET | `/auth/google/callback` | Anónimo (cookie `External`) | `oauth` (20/min/IP) | ⚠️ Código completo; depende de `sp_UpsertExternalLogin` (sin confirmar en vivo) | Ver hallazgo sobre PII+token en query string en `bugs.md` ítems 1 y 15. **YA NO dispara auto-aprovisionamiento de BD MySQL** (removido, ver hallazgo 9) — el frontend debe pedirla explícitamente. |
+| GET | `/auth/github/login` | Anónimo | `oauth` (20/min/IP) | ✅ Funcional | Redirige al flujo OAuth de GitHub. |
+| GET | `/auth/github/callback` | Anónimo (cookie `External`) | `oauth` (20/min/IP) | ⚠️ Código completo; depende de `sp_UpsertExternalLogin` (sin confirmar en vivo) | Igual que Google callback — sin auto-aprovisionamiento (hallazgo 9). |
 | POST | `/databases` (cualquier `engine`) | JWT Bearer | **`db-provisioning` (5/min/usuario)** | ⚠️ Código completo; depende de `sp_ReserveDatabase` / `sp_ConfirmDatabase` / `sp_FailDatabase` | **Los 4 motores (`SqlServer`, `Postgres`, `MySql`, `Mongo`) tienen provisioner real implementado** (ver hallazgo 5 — esta fila corrige la versión anterior de esta tabla, que los describía como stubs). Rate limit dedicado agregado en esta revisión (antes solo el global). |
 | GET | `/databases` | JWT Bearer | Solo global | ⚠️ Código completo; depende de `sp_GetUserDatabases` | Lista las BDs del usuario autenticado (claim `UserId`). |
 | GET | `/databases/{id}` | JWT Bearer | Solo global | 🆕 Código completo; depende de `sp_GetDatabaseDetail` (nuevo, sin desplegar) | Detalle de una BD puntual (host/puerto/usuario/estado, nunca la contraseña) — para cuando el usuario perdió sus datos de conexión. 404 si no existe o no es del usuario (mismo mensaje para ambos casos, evita enumeración). |
@@ -122,6 +122,24 @@
     y de la sección `Email` (SMTP) en `appsettings.json`, que hoy tiene
     placeholders — **no funcionará hasta que ambas cosas se configuren**. Ver
     `docs/bugs.md` (nuevo hallazgo) y la bitácora en `docs/claude.md`.
+    **Actualización 2026-07-23:** ese archivo `sql/...sps.sql` no está
+    presente en el repositorio conectado (no existe carpeta `sql/`) — ver el
+    detalle en `docs/bugs.md` ítem 19 (actualización 2026-07-23).
+    **Actualización 2026-07-23 (v2):** la otra dependencia pendiente de esta
+    fila (SMTP en la sección `Email` de `appsettings.json`) ya se resolvió —
+    el archivo conectado tiene una cuenta SMTP real de Gmail configurada, ya
+    no placeholders. Solo sigue faltando desplegar los 4 SPs.
+    **Actualización 2026-07-23 (v3):** el usuario confirmó que los 4 SPs ya se
+    desplegaron contra la BD real y que los 4 endpoints funcionan de punta a
+    punta — este ítem (bug 19) queda 🟢 Resuelto. También confirmó el fix del
+    `redirect_uri_mismatch` de OAuth en QA (bug 17, 🟢).
+
+12. **Nuevo rate limit dedicado en los 4 endpoints OAuth** (`bugs.md` ítem 2,
+    2026-07-23): antes solo los cubría el límite global (100/min/IP). Se agregó
+    la política `oauth` (20/min por IP) en [`Program.cs`](../Program.cs) y
+    `[EnableRateLimiting("oauth")]` en los login/callback de Google y GitHub de
+    [`Controllers/AuthController.cs`](../Controllers/AuthController.cs). Se
+    reflejó en la columna "Rate limit" de la tabla de arriba.
 
 ## Mantenimiento de este documento
 

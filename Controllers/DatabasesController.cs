@@ -3,6 +3,7 @@ using idempotencia.DTOs;
 using idempotencia.Interfaces;
 using idempotencia.Middleware;
 using idempotencia.Models;
+using idempotencia.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -116,7 +117,7 @@ public class DatabasesController : ControllerBase
     // Extrae el UserId del claim del JWT emitido por el backend.
     private int GetUserId()
     {
-        var raw = User.FindFirstValue("UserId");
+        var raw = User.FindFirstValue(JwtClaimNames.UserId);
         if (!int.TryParse(raw, out var userId))
             throw new AuthException("El token no contiene un identificador de usuario válido.");
         return userId;

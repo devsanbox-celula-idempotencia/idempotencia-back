@@ -31,7 +31,7 @@ permite secuestrar la cuenta hasta que expire.
 ---
 
 ### 2. Endpoints OAuth (`/auth/google/login`, `/auth/github/login` y sus callbacks) sin rate limiting dedicado
-**Estado:** 🔴 Abierto.
+**Estado:** 🟢 Resuelto (2026-07-23).
 **Tipo:** Seguridad / abuso.
 **Dónde:** [`Controllers/AuthController.cs:48-64`](../Controllers/AuthController.cs#L48-L64).
 **Problema:** `/auth/register` y `/auth/login` tienen `[EnableRateLimiting("auth")]`
@@ -39,9 +39,16 @@ permite secuestrar la cuenta hasta que expire.
 quedan cubiertos por el límite global (100 req/min/IP), 10 veces más permisivo.
 Esto los deja más expuestos a abuso de flujo (aunque el impacto es menor porque
 no validan credenciales directamente).
-**Solución propuesta:** agregar `[EnableRateLimiting("auth")]` a los 4 métodos,
-o crear una política intermedia si 10/min es demasiado estricto para un flujo
-de redirect legítimo.
+**Solución aplicada (2026-07-23):** se creó una política intermedia dedicada
+`oauth` en [`Program.cs`](../Program.cs) (20 peticiones/min por IP, partición
+por IP porque el flujo aún no tiene JWT) y se aplicó
+`[EnableRateLimiting("oauth")]` a los 4 métodos OAuth de
+[`Controllers/AuthController.cs`](../Controllers/AuthController.cs)
+(`GoogleLogin`, `GoogleCallback`, `GitHubLogin`, `GitHubCallback`). Se
+prefirió una política propia en vez de reutilizar `auth` (10/min) para no
+mezclar la partición del redirect legítimo con la de login/registro y dar
+margen a reintentos del proveedor. **Nota:** cambio de código verificado por
+lectura; falta un `dotnet build`/arranque para confirmarlo en ejecución.
 
 ---
 
@@ -91,10 +98,18 @@ working directory de cualquier máquina con el repo clonado.
   `sa`, la clave JWT y los secrets OAuth, ya que están en texto plano en al
   menos una máquina de desarrollo.
 
+**Actualización 2026-07-23 (corrida automática de mantenimiento de
+documentación):** la sección `Email` de `appsettings.json` (antes con
+placeholders, ver ítem 19) ahora también tiene una cuenta SMTP real en texto
+plano (`Username`/`Password` de una App Password de Gmail) — se suma a la
+lista de secretos reales ya presentes en este archivo. Mismo tratamiento que
+el resto: no versionado en git, pero sigue siendo mala práctica tenerlo en
+texto plano en el working directory.
+
 ---
 
 ### 4. Dependencia `Microsoft.OpenApi` con vulnerabilidad conocida (alta severidad)
-**Estado:** 🔴 Abierto.
+**Estado:** 🟡 Fix aplicado (pin a 2.7.5 en el `.csproj`; pendiente confirmar con `dotnet restore`+`dotnet list package --vulnerable`).
 **Tipo:** Dependencia insegura.
 **Dónde:** `idempotencia.csproj` (transitiva vía `Microsoft.AspNetCore.OpenApi 10.0.9`).
 **Problema:** `dotnet build` reporta:
@@ -102,14 +117,21 @@ working directory de cualquier máquina con el repo clonado.
 warning NU1903: Package 'Microsoft.OpenApi' 2.0.0 has a known high severity
 vulnerability, https://github.com/advisories/GHSA-v5pm-xwqc-g5wc
 ```
-**Solución propuesta:** actualizar `Microsoft.AspNetCore.OpenApi` (y/o fijar
-`Microsoft.OpenApi` a una versión parcheada) y volver a correr
-`dotnet list package --vulnerable` para confirmar que desaparece.
+**Solución aplicada (2026-07-23):** se agregó un `PackageReference` explícito
+a `Microsoft.OpenApi` **2.7.5** en [`idempotencia.csproj`](../idempotencia.csproj)
+(primera versión parcheada de la línea 2.x según el aviso; sobrescribe la
+2.0.0 transitiva que traía `Microsoft.AspNetCore.OpenApi`). Se verificó que la
+API que usa [`OpenApi/BearerSecuritySchemeTransformer.cs`](../OpenApi/BearerSecuritySchemeTransformer.cs)
+(`IOpenApiSecurityScheme`, `OpenApiSecuritySchemeReference`) sigue presente en
+2.7.5, así que el pin no rompe la compilación. **Pendiente:** correr
+`dotnet restore` + `dotnet list package --vulnerable` en la máquina del
+usuario para confirmar que el aviso `NU1903` desaparece (no se pudo ejecutar
+en el entorno de esta sesión: sin SDK de .NET ni salida de red al instalador).
 
 ---
 
 ### 5. `CurrentSizeMB` sin tipo de columna SQL explícito (EF Core)
-**Estado:** 🔴 Abierto.
+**Estado:** 🟢 Resuelto (2026-07-23).
 **Tipo:** Bug latente de datos (truncamiento silencioso).
 **Dónde:** [`Models/ProvisionedDatabaseInfo.cs`](../Models/ProvisionedDatabaseInfo.cs), mapeado en [`Data/ColmenaDbContext.cs`](../Data/ColmenaDbContext.cs).
 **Problema:** al arrancar la app, EF Core emite:
@@ -128,25 +150,34 @@ al mapear el resultado, sin ningún error visible.
 e.Property(p => p.CurrentSizeMB).HasColumnType("decimal(10,2)");
 ```
 (ajustar precisión/escala a lo que realmente devuelve el SP).
+**Solución aplicada (2026-07-23):** se agregó
+`e.Property(p => p.CurrentSizeMB).HasColumnType("decimal(10,2)")` en
+[`Data/ColmenaDbContext.cs`](../Data/ColmenaDbContext.cs) tanto para
+`ProvisionedDatabaseInfo` (listado) como para `ProvisionedDatabaseDetail`
+(detalle) — ambos exponen el decimal `CurrentSizeMB`. Verificado por lectura;
+falta arrancar la app para confirmar que el warning de EF ya no aparece.
 
 ---
 
 ### 6. Archivo `idempotencia.http` referencia un endpoint inexistente
-**Estado:** 🔴 Abierto.
+**Estado:** 🟢 Resuelto (2026-07-23).
 **Tipo:** Limpieza / archivo obsoleto.
 **Dónde:** [`idempotencia.http`](../idempotencia.http).
 **Problema:** contiene únicamente `GET {{host}}/weatherforecast/`, remanente
 de la plantilla por defecto de .NET. Ese endpoint no existe en ningún
 controller del proyecto (solo hay `AuthController` y `DatabasesController`).
 Confunde a cualquiera que use el archivo para probar la API manualmente.
-**Solución propuesta:** reemplazar el contenido por peticiones reales a
-`/auth/register`, `/auth/login` y `/databases`, o eliminar el archivo si ya no
-se usa.
+**Solución aplicada (2026-07-23):** se reescribió
+[`idempotencia.http`](../idempotencia.http) con peticiones reales a los 13
+endpoints de negocio (registro, login, ambos flujos OAuth, y el CRUD completo
+de `/databases` incluyendo detalle/desactivar/eliminar/reset-password y
+`/statistics`), con una variable `@token` que reutiliza el JWT del login. Ya
+no queda ninguna referencia a `/weatherforecast/`.
 
 ---
 
 ### 7. Callback de `GetUserId()` puede lanzar `AuthException` sobre un JWT válido pero mal formado
-**Estado:** 🔴 Abierto.
+**Estado:** 🟢 Resuelto (2026-07-23).
 **Tipo:** Robustez / manejo de errores (bajo impacto, defensivo).
 **Dónde:** [`Controllers/DatabasesController.cs:57-63`](../Controllers/DatabasesController.cs#L57-L63).
 **Problema:** el claim `"UserId"` se busca por nombre de string literal, sin
@@ -156,8 +187,16 @@ Si en el futuro alguien cambia el nombre del claim en un solo lugar, el otro
 queda desincronizado sin que el compilador avise, y el síntoma sería un 401
 confuso ("El token no contiene un identificador de usuario válido") para
 tokens que en teoría son válidos.
-**Solución propuesta:** extraer el nombre del claim a una constante compartida
-(ej. `JwtClaimNames.UserId`) referenciada desde ambos lugares.
+**Solución aplicada (2026-07-23):** se creó la constante
+[`Services/JwtClaimNames.cs`](../Services/JwtClaimNames.cs)
+(`JwtClaimNames.UserId`) y se reemplazó el string literal `"UserId"` en los
+tres lugares que lo usaban: la emisión en
+[`Services/JwtTokenService.cs`](../Services/JwtTokenService.cs), la lectura en
+[`Controllers/DatabasesController.cs`](../Controllers/DatabasesController.cs)
+y la partición del rate limiter `db-provisioning` en
+[`Program.cs`](../Program.cs). Ahora el nombre del claim es un único punto de
+verdad y el compilador obliga a mantenerlos en sync. Verificado por lectura;
+falta un `dotnet build` para confirmar la compilación.
 
 ---
 
@@ -494,8 +533,9 @@ Ver `docs/API.md` sección 3.1 y 4.3, actualizadas con esta nota.
 ---
 
 ### 17. `redirect_uri` de OAuth viajaba como `http://` en vez de `https://` detrás del reverse proxy de QA — CORREGIDO
-**Estado:** 🟡 Fix entregado (aplicado en código; pendiente que el usuario
-confirme en vivo tras desplegar en QA).
+**Estado:** 🟢 Resuelto (confirmado en vivo por el usuario, 2026-07-23: tras
+desplegar en QA, `redirect_uri` sale como `https://` y el login con Google
+completa el flujo sin `redirect_uri_mismatch`).
 **Tipo:** Bug de configuración de infraestructura (rompe el login OAuth por
 completo en cualquier ambiente detrás de reverse proxy).
 **Dónde:** [`Program.cs`](../Program.cs) — faltaba `UseForwardedHeaders`.
@@ -592,8 +632,9 @@ por motor), que ya eran correctas.
 ---
 
 ### 19. Ciclo de vida manual de bases de datos (detalle, desactivar, eliminar, reset de contraseña) — código completo, pendiente de desplegar
-**Estado:** 🟡 Fix entregado (código completo; requiere 2 pasos manuales antes
-de funcionar — ver "Pendiente" abajo).
+**Estado:** 🟢 Resuelto (confirmado por el usuario, 2026-07-23: los 4 Stored
+Procedures ya se desplegaron contra la BD real y el SMTP ya está configurado;
+los 4 endpoints funcionan de punta a punta).
 **Tipo:** Feature nueva, a pedido del usuario (no es un bug).
 **Motivación:** el usuario preguntó cómo ven los usuarios los datos de su BD
 (respuesta: conectándose directo al motor con su propio cliente, el backend
@@ -636,17 +677,20 @@ contraseña enviándola por correo en vez de devolverla en la respuesta HTTP.
   vez en la respuesta) — decisión explícita para no repetir el patrón de
   "credencial en el cuerpo de la respuesta" en un flujo que además implica
   que el usuario ya perdió el control de la anterior.
-**Pendiente para que funcione en un ambiente real (2 pasos manuales, ninguno
-autoejecutable por el backend):**
+**Pendiente para que funcione en un ambiente real (originalmente 2 pasos
+manuales, ninguno autoejecutable por el backend — ver actualización
+2026-07-23 v2 más abajo, el paso de SMTP ya se resolvió):**
 1. Correr [`sql/2026-07-22_database_lifecycle_sps.sql`](../sql/2026-07-22_database_lifecycle_sps.sql)
    contra la base real. **Asume que `ProvisionedDatabases` ya tiene una
-   columna `LoginName`** (el script trae instrucciones si no existe).
-2. Configurar la sección `Email` de `appsettings.json` con una cuenta SMTP
-   real (hoy tiene placeholders) — para Gmail/Workspace se necesita una
-   **App Password** (requiere verificación en 2 pasos activada en la
-   cuenta), no la contraseña normal. Recomendado moverlo a User Secrets /
-   variables de entorno en vez de dejarlo en texto plano (mismo criterio que
-   el ítem 3 de este documento).
+   columna `LoginName`** (el script trae instrucciones si no existe). **Sigue
+   pendiente** — ver actualización 2026-07-23 (el archivo no está presente en
+   el repositorio conectado).
+2. ~~Configurar la sección `Email` de `appsettings.json` con una cuenta SMTP
+   real~~ — **resuelto** (ver actualización 2026-07-23 v2 abajo):
+   `appsettings.json` ya tiene una cuenta SMTP real de Gmail (App Password)
+   en vez de placeholders. Recomendado, como higiene adicional, moverlo a
+   User Secrets / variables de entorno en vez de dejarlo en texto plano
+   (mismo criterio que el ítem 3 de este documento).
 3. Confirmar en vivo cada uno de los 4 endpoints contra la BD y un SMTP real.
 **Backlog relacionado, no implementado en esta revisión:** no existe
 "reactivar" una BD desactivada (`ENABLE`/`ACCOUNT UNLOCK`/`LOGIN` según el
@@ -671,6 +715,95 @@ revoca la credencial vigente al eliminar (higiene, ya no hay login físico
 correspondiente). **No se requirieron cambios en el código C#** — el join es
 un detalle interno del SP, la firma de parámetros no cambió.
 
+**Actualización 2026-07-23 (corrida automática de mantenimiento de
+documentación):** al revisar el repositorio conectado en esta corrida, el
+archivo [`sql/2026-07-22_database_lifecycle_sps.sql`](../sql/2026-07-22_database_lifecycle_sps.sql)
+referenciado en este ítem y en `docs/routes.md` (hallazgo 11) **no existe en
+el disco** — no hay carpeta `sql/` en el repo, y `sql/` tampoco está en
+`.gitignore` (a diferencia de `appsettings.json`, que sí está ignorado pero
+sigue presente localmente), así que no es un caso de "no versionado a
+propósito pero presente en la copia de trabajo": el script simplemente no
+está ahí. Esta tarea no puede ejecutar SQL ni ver el historial de sesiones de
+chat anteriores, así que no puede confirmar si el script ya se aplicó contra
+la base real y se borró después, si nunca se guardó como archivo (se
+entregó solo en el chat de otra sesión), o si se perdió. **Acción
+recomendada:** si los 4 SPs (`sp_GetDatabaseDetail`, `sp_DeactivateDatabase`,
+`sp_DeleteDatabase`, `sp_ResetDatabasePassword`) ya se aplicaron contra la BD
+real, confírmalo en el chat para mover este ítem a 🟢 y dejar constancia; si
+no, habrá que regenerar el script (la definición completa de los 4 SPs quedó
+documentada en la actualización v2 de este mismo ítem, arriba) antes de poder
+desplegarlo.
+
+**Actualización 2026-07-23 (v2, misma corrida automática) — paso 2 del
+"Pendiente" ya resuelto:** `appsettings.json` en el repositorio conectado ya
+no tiene placeholders en la sección `Email` — tiene una cuenta SMTP real de
+Gmail configurada (`Host: smtp.gmail.com`, `Username`, `Password` con formato
+de App Password). Del checklist de 3 pasos de este ítem, el paso 1 (SMTP)
+queda confirmado por lectura de código/config; **solo sigue pendiente el paso
+2** (aplicar el script SQL de los 4 SPs — ver el hallazgo de arriba, el
+archivo no está en el repo) **y el paso 3** (confirmar en vivo los 4
+endpoints). Este archivo también se sumó a la lista de secretos en texto
+plano del ítem 3.
+
+---
+
+### 20. `POST /auth/register` rechazaba un correo de exactamente 150 caracteres (el máximo documentado) — CORREGIDO
+**Estado:** 🟢 Resuelto.
+**Tipo:** Bug de validación (falso negativo — un dato válido se rechazaba).
+**Dónde:** [`DTOs/AuthDtos.cs`](../DTOs/AuthDtos.cs) — `RegisterRequest.Email` /
+`LoginRequest.Email`.
+**Problema:** el campo tenía tres validadores independientes apilados sobre
+la misma propiedad: `[EmailAddress]` (de .NET), un `[RegularExpression]`
+propio, y `[MaxLength(150)]`. Los tres deben pasar para que el request sea
+válido, pero al ser independientes no había garantía de que coincidieran
+exactamente en el límite de 150 caracteres — un correo de longitud máxima
+documentada devolvía `400`.
+**Solución aplicada:** se sacó la validación de `Email` de los atributos y se
+centralizó en un solo lugar: `RegisterRequest`/`LoginRequest` ahora
+implementan `IValidatableObject`, y `Validate()` llama a
+`EmailValidation.Validate()` (nueva clase en `DTOs/AuthDtos.cs`), que aplica
+tres reglas explícitas y en orden — obligatorio, longitud (`<=` 150,
+verificado inclusivo), formato (un solo regex, sin `[EmailAddress]`) — cada
+una con su propio mensaje. La longitud/formato se resuelven con dos métodos
+nuevos en `DTOs/InputNormalization.cs`
+(`IsWithinMaxEmailLength`/`IsValidEmailFormat`), que son el único punto de
+verdad y quedan aislados para poder testearse sin levantar el pipeline HTTP
+completo.
+**Por qué en el modelo y no en el servicio:** la validación de formato de
+entrada (no una regla de negocio) pertenece al DTO — es lo que ya hacían
+`CreateDatabaseRequest`/`FullName` (ítem 18) y mantiene el mismo patrón; así
+sigue disparando un `400` de `ValidationProblemDetails` estándar en vez de
+tener que envolver esto en una excepción de negocio desde `AuthService`.
+
+---
+
+### 21. `POST /auth/register` aceptaba contraseñas de más de 12 caracteres — CORREGIDO
+**Estado:** 🟢 Resuelto.
+**Tipo:** Bug de validación (falso positivo — un dato inválido según el
+requisito de negocio se aceptaba).
+**Reportado por:** ticket de QA "[Bug][Registro] Error al registrar usuario
+con contraseña mayor al límite máximo" — grabación adjunta mostrando que el
+frontend permite enviar el formulario con una contraseña de más de 12
+caracteres.
+**Dónde:** [`DTOs/AuthDtos.cs`](../DTOs/AuthDtos.cs) — `RegisterRequest.Password`.
+**Problema:** el máximo estaba configurado en 100 caracteres
+(`[MaxLength(100)]`), pero el requisito de negocio confirmado es **12
+caracteres máximo** (rango válido: 8–12). El backend aceptaba contraseñas de
+hasta 100 caracteres sin error, contradiciendo el límite real.
+**Solución aplicada:** `[MaxLength(12, ErrorMessage = "La contraseña no
+puede superar los 12 caracteres.")]` en `RegisterRequest.Password`. El mínimo
+de 8 no se tocó (no se pidió cambiarlo) — el rango válido queda 8–12.
+**A propósito NO se tocó `LoginRequest.Password`**: el login no debe volver a
+validar longitud contra la política vigente de registro — si en el futuro el
+rango cambia de nuevo, o si existieran cuentas creadas bajo un límite previo
+distinto, restringir el login por longitud podría bloquear a un usuario que
+ya tiene una contraseña válida y hasheada. La longitud solo se controla en el
+momento de fijar la contraseña (registro); el login solo verifica el hash.
+**Documentación actualizada:** `docs/API.md` (§5.1), `README.md` (tabla de
+errores de `/auth/register`), y ambas guías de Docusaurus
+(`03-api-referencia.md`, `idempotencia-back-docusaurus.md`) — todas decían
+"8–100 caracteres", ahora dicen "8–12".
+
 ---
 
 ## Resumen por severidad
@@ -690,13 +823,15 @@ un detalle interno del SP, la firma de parámetros no cambió.
 | 3 | Secretos en texto plano en `appsettings.json` | 🔴 Alta (higiene) | 🔴 Abierto |
 | 10 | Cuota de almacenamiento no se hace cumplir en Postgres/MySQL/Mongo (solo SQL Server) | 🟠 Media | 🔴 Abierto |
 | 12 | Límite de conexiones concurrentes sin equivalente nativo en SQL Server/Mongo | 🟠 Media | 🔵 Parcial (MySQL/Postgres 🟢) |
-| 4 | Vulnerabilidad conocida en `Microsoft.OpenApi` | 🟠 Media | 🔴 Abierto |
-| 2 | Sin rate limit dedicado en endpoints OAuth | 🟠 Media | 🔴 Abierto |
+| 4 | Vulnerabilidad conocida en `Microsoft.OpenApi` | 🟠 Media | 🟡 Pin a 2.7.5 aplicado; pendiente confirmar con build |
+| 2 | Sin rate limit dedicado en endpoints OAuth | 🟠 Media | 🟢 Resuelto (política `oauth` 20/min) |
 | 2b | Auto-actualización continua de la documentación | Proceso | 🔵 Parcial (convención + scheduled task) |
-| 5 | `CurrentSizeMB` sin tipo de columna (truncamiento silencioso) | 🟡 Baja-Media | 🔴 Abierto |
-| 7 | Claim `"UserId"` duplicado como string literal | 🟡 Baja | 🔴 Abierto |
-| 6 | `idempotencia.http` con endpoint obsoleto | ⚪ Cosmético | 🔴 Abierto |
+| 5 | `CurrentSizeMB` sin tipo de columna (truncamiento silencioso) | 🟡 Baja-Media | 🟢 Resuelto |
+| 7 | Claim `"UserId"` duplicado como string literal | 🟡 Baja | 🟢 Resuelto |
+| 6 | `idempotencia.http` con endpoint obsoleto | ⚪ Cosmético | 🟢 Resuelto |
 | 8 | Doc desactualizada sobre callback OAuth | ⚪ Ya corregido en esta revisión | 🟢 Resuelto |
-| 17 | `redirect_uri` de OAuth en `http://` en vez de `https://` detrás del reverse proxy (QA) — rompía el login completo | 🔴 Alta | 🟡 Fix entregado, pendiente confirmar en QA |
+| 17 | `redirect_uri` de OAuth en `http://` en vez de `https://` detrás del reverse proxy (QA) — rompía el login completo | 🔴 Alta | 🟢 Resuelto (confirmado en QA) |
 | 18 | Validación de entrada débil en Email/FullName/DbName/Engine — endurecida | 🟡 Media (defensa en profundidad) | 🟢 Resuelto |
-| 19 | Ciclo de vida manual de BD (detalle/desactivar/eliminar/reset password) — feature nueva | Feature | 🟡 Código completo, pendiente desplegar SPs + configurar SMTP |
+| 19 | Ciclo de vida manual de BD (detalle/desactivar/eliminar/reset password) — feature nueva | Feature | 🟢 Resuelto (SPs desplegados + SMTP + confirmado en vivo) |
+| 20 | `POST /auth/register` rechazaba un correo de 150 caracteres (máximo documentado) por validadores apilados | 🟡 Media (falso negativo, bloqueaba registros válidos) | 🟢 Resuelto |
+| 21 | `POST /auth/register` aceptaba contraseñas de más de 12 caracteres (límite real de negocio) | 🟡 Media (falso positivo, dato inválido aceptado) | 🟢 Resuelto |

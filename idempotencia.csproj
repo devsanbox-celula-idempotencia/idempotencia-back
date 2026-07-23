@@ -12,6 +12,11 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.Google" Version="10.0.10" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.9" />
+    <!-- Pin explícito de Microsoft.OpenApi: la 2.0.0 que entra transitiva por
+         Microsoft.AspNetCore.OpenApi tiene la vulnerabilidad alta GHSA-v5pm-xwqc-g5wc
+         (NU1903). 2.7.5 es la primera versión parcheada de la línea 2.x y es
+         compatible con la API que usa BearerSecuritySchemeTransformer. -->
+    <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.10" />
     <PackageReference Include="MailKit" Version="4.9.0" />
     <PackageReference Include="MongoDB.Driver" Version="3.10.0" />
