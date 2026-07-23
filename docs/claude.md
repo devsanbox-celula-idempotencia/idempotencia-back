@@ -297,25 +297,75 @@ documentación del backend para subir a un sitio Docusaurus.
 `redirect_uri` ya sale como `https://` y que el login con Google completa sin
 error, para pasar el ítem 17 de 🟡 a 🟢.
 
+---
+
+## Sesión 6 — 2026-07-22 (fix de `sp_UpsertExternalLogin`, guía de creación de BD para el front, endurecimiento de validación de entrada)
+
+**Pedido:** confirmar y arreglar el error genérico que devolvía el callback
+OAuth (`?error=Ocurrió un error al procesar la solicitud.`); generar una guía
+para el frontend específica del flujo de creación de bases de datos; y
+validar mejor los datos que manda el usuario (correos, espacios, nombres de
+BD) para evitar SQL injection y proteger esos datos.
+
+**Qué se hizo:**
+
+1. **`sp_UpsertExternalLogin` confirmado con el mismo bug que
+   `sp_GetLoginByEmail`** (ítem 9 de `bugs.md`, actualizado): el usuario pasó
+   el `sp_helptext` real y se confirmó el mismo `JOIN`/`INSERT` contra una
+   tabla `Roles` inexistente, más un segundo bug propio (`RoleName` en vez de
+   `Role` en el SELECT final, que no coincide con `Models/UserIdentity.cs`).
+   Se entregó el `CREATE OR ALTER PROCEDURE` corregido. **Pendiente:** que el
+   usuario lo aplique contra la BD real y confirme el login OAuth.
+2. **Guía de creación de bases de datos para el frontend**
+   (`docusaurus-docs/guia-creacion-bases-de-datos.md`): cuándo se crea sola
+   la BD (login/registro por contraseña) vs. cuándo hay que pedirla manual
+   (OAuth), referencia completa de `POST /databases`, por qué la contraseña
+   solo se entrega una vez, cómo se resuelve `maxConcurrentConnections`,
+   errores a manejar, y un checklist final.
+3. **Endurecimiento de validación de entrada** (`bugs.md` ítem 18, nuevo):
+   se agregaron `[RegularExpression]` + normalización (trim, minúsculas en
+   email, colapso de espacios en nombres) a `RegisterRequest`/`LoginRequest`
+   (`Email`, `FullName`) y `CreateDatabaseRequest` (`Engine`, `DbName`), más
+   un helper compartido `DTOs/InputNormalization.cs`. La misma normalización
+   se aplicó a los datos que llegan de los callbacks OAuth en
+   `AuthController`. Motivación: `DbName`/`Engine` terminan formando parte de
+   DDL crudo en los provisioners (ya protegido con escape de identificadores
+   por motor, pero sin validación de formato previa en el DTO); los cambios
+   son una capa adicional de defensa en profundidad, no reemplazan las
+   protecciones ya correctas (parámetros tipados en todo el acceso al
+   catálogo). Documentado en `docs/API.md` y en la guía de creación de BD.
+
+**Pendiente:** confirmar en vivo el fix de `sp_UpsertExternalLogin` (login
+OAuth completo de punta a punta); considerar si conviene bajar el
+`MaxLength` de `DbName` (hoy 128) para dejar margen seguro bajo el límite de
+identificador de 64 caracteres de MySQL una vez aplicado el prefijo por
+usuario — no se cambió en esta sesión para no alterar un límite ya
+documentado públicamente sin coordinarlo primero.
+
 ## Backlog / próximos pasos
 
 1. **Confirmar en vivo el fix del ítem 17** (`redirect_uri_mismatch` en QA)
    tras desplegar — mover de 🟡 a 🟢 en `bugs.md`.
-2. **Confirmar `sp_UpsertExternalLogin`** (callback OAuth Google/GitHub) si
-   tiene el mismo bug de `Roles`/`RoleId` que tenía `sp_GetLoginByEmail`
-   (ítem 9, ya resuelto).
-3. **Ciclo de vida (TTL)**: implementar `sp_GetIdleDatabases`,
+2. **Confirmar en vivo el fix de `sp_UpsertExternalLogin`** (ítem 9) tras
+   aplicar el `ALTER PROCEDURE` en la BD real — probar un login OAuth
+   completo de punta a punta.
+3. **Evaluar bajar el `MaxLength` de `CreateDatabaseRequest.DbName`** (hoy
+   128) para dejar margen bajo el límite de identificador de 64 caracteres
+   de MySQL una vez concatenado el prefijo por usuario — no se tocó en la
+   sesión 6 para no alterar un límite ya documentado públicamente sin
+   coordinarlo antes.
+4. **Ciclo de vida (TTL)**: implementar `sp_GetIdleDatabases`,
    `sp_PauseDatabase`, `sp_DeleteDatabase` + `DatabaseLifecycleJob` — ítem 11
    de `bugs.md`.
-4. **Cuota de almacenamiento real** para Postgres/MySQL/Mongo — ítem 10 de
+5. **Cuota de almacenamiento real** para Postgres/MySQL/Mongo — ítem 10 de
    `bugs.md`.
-5. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
+6. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
    ítem 12 de `bugs.md`.
-6. Token JWT (y PII) viaja en query string en el redirect OAuth — ítems 1 y
+7. Token JWT (y PII) viaja en query string en el redirect OAuth — ítems 1 y
    15 de `bugs.md`.
-7. Secretos reales en texto plano en `appsettings.json` — ítem 3 de
+8. Secretos reales en texto plano en `appsettings.json` — ítem 3 de
    `bugs.md`.
-8. Vulnerabilidad conocida en `Microsoft.OpenApi` — ítem 4 de `bugs.md`.
-9. Sin rate limit dedicado en los 4 endpoints OAuth — ítem 2 de `bugs.md`.
-10. `CurrentSizeMB` sin tipo de columna explícito en EF Core — ítem 5 de
+9. Vulnerabilidad conocida en `Microsoft.OpenApi` — ítem 4 de `bugs.md`.
+10. Sin rate limit dedicado en los 4 endpoints OAuth — ítem 2 de `bugs.md`.
+11. `CurrentSizeMB` sin tipo de columna explícito en EF Core — ítem 5 de
     `bugs.md`.

@@ -226,11 +226,31 @@ END;
 **Actualización:** `sp_RegisterUser` se confirmó en vivo funcionando
 correctamente (mismo log del 2026-07-21: `EXEC sp_RegisterUser` ejecuta sin
 error y el registro completa el flujo de auto-aprovisionamiento MySQL) — no
-tiene el mismo bug. **Pendiente de verificar:** `sp_UpsertExternalLogin` (el
-que usan los callbacks de Google/GitHub) — todavía no se ha probado en vivo,
-podría o no tener el mismo patrón heredado. Falta pedir su texto
-(`sp_helptext 'sp_UpsertExternalLogin'`) o probar un login OAuth real para
-confirmar.
+tiene el mismo bug.
+
+**Actualización 2026-07-22 — `sp_UpsertExternalLogin` CONFIRMADO con el mismo
+bug (y uno adicional):** al probar el login OAuth de Google en QA (una vez ya
+corregido el `redirect_uri_mismatch` del ítem 17), el callback devolvía
+`?error=Ocurrió un error al procesar la solicitud.` — el mensaje genérico que
+`ApiExceptionMapper` usa para un `SqlException` con `Number < 50000` (no es
+una regla de negocio, es un error real de SQL). Se pidió el `sp_helptext` y
+se confirmó:
+1. Mismo problema que `sp_GetLoginByEmail`: `INNER JOIN Roles r ON r.RoleId =
+   u.RoleId` y `INSERT INTO Users (RoleId, ...) SELECT RoleId ... FROM Roles
+   WHERE Name = 'Student'` — la tabla `Roles` no existe; `Users.Role` es
+   columna string directa.
+2. **Bug adicional que `sp_GetLoginByEmail` no tenía**: el SELECT final
+   devolvía la columna como `RoleName`, pero `Models/UserIdentity.cs` (el
+   tipo al que EF mapea el resultado de `sp_UpsertExternalLogin` vía
+   `FromSqlRaw`) espera la propiedad `Role`. Con solo quitar el `JOIN`
+   seguiría fallando por este segundo motivo.
+
+**Solución entregada** (`CREATE OR ALTER PROCEDURE sp_UpsertExternalLogin`,
+pasada al usuario en el chat): reemplaza el `INSERT`/`JOIN` contra `Roles`
+por `Users.Role` directo (`VALUES ('Student', ...)`), y el SELECT final
+devuelve `u.Role` en vez de `r.Name AS RoleName`. **Pendiente:** confirmar en
+vivo tras aplicar el `ALTER PROCEDURE` en la base real que el login OAuth de
+Google/GitHub completa sin error.
 
 ---
 
@@ -518,6 +538,59 @@ flujo sin `redirect_uri_mismatch`.
 
 ---
 
+### 18. Validación de entrada débil en `Email`/`FullName`/`DbName`/`Engine` — endurecida
+**Estado:** 🟢 Resuelto.
+**Tipo:** Endurecimiento de seguridad / calidad de dato (no era una
+vulnerabilidad explotable confirmada, sino una superficie de riesgo:
+validación mínima dejaba pasar valores mal formados hacia capas más
+sensibles).
+**Dónde:** [`DTOs/AuthDtos.cs`](../DTOs/AuthDtos.cs),
+[`DTOs/DatabaseDtos.cs`](../DTOs/DatabaseDtos.cs),
+[`DTOs/InputNormalization.cs`](../DTOs/InputNormalization.cs) (nuevo),
+[`Controllers/AuthController.cs`](../Controllers/AuthController.cs).
+**Contexto previo:** el catálogo (SQL Server) ya estaba protegido contra SQL
+injection clásica — todas las consultas usan `FromSqlRaw` + `SqlParameter`
+tipados, nunca concatenación de strings. El punto más sensible real era
+`DbName`/`Engine` en `POST /databases`: esos valores terminan formando parte
+de sentencias DDL crudas dentro de cada `IDatabaseProvisioner`
+(`CREATE DATABASE`, `CREATE USER`/`CREATE LOGIN`, `GRANT`). Ya se citaban
+identificadores por motor (`[corchetes]` en SQL Server, `` `backticks` `` en
+MySQL, `"comillas"` en Postgres) como defensa en profundidad, pero la
+validación de entrada en el DTO era mínima (`[MaxLength]` nada más) — un
+nombre con espacios, comillas o `;` llegaba hasta esa capa antes de ser
+neutralizado solo por el escape.
+**Solución aplicada:**
+- `CreateDatabaseRequest.DbName`: `[RegularExpression(@"^[a-zA-Z][a-zA-Z0-9_]{2,127}$")]`
+  — solo letras/números/guion bajo, debe empezar con letra. Rechaza con `400`
+  cualquier caracter fuera de ese set antes de tocar la base de datos.
+- `CreateDatabaseRequest.Engine`: `[RegularExpression("^(SqlServer|Postgres|MySql|Mongo)$")]`
+  — feedback de validación inmediato (antes ya se validaba en
+  `DatabaseProvisionerFactory`, pero solo con un `400` genérico más tarde en
+  el flujo).
+- `RegisterRequest.Email` / `LoginRequest.Email`: además de `[EmailAddress]`,
+  se agregó `[RegularExpression(@"^[^@\s]+@[^@\s]+\.[^@\s]+$")]` (más
+  estricto) y normalización automática (trim + minúsculas) en el setter,
+  para que variantes de mayúsculas/espacios no generen cuentas "distintas"
+  ni errores de validación confusos.
+- `RegisterRequest.FullName`: `[RegularExpression]` que solo admite letras
+  (con acentos/ñ vía `\p{L}`), espacios, apóstrofes, guiones y puntos —
+  bloquea dígitos y símbolos de control. Los espacios repetidos se colapsan
+  automáticamente.
+- `AuthController.ResolveExternalLoginAsync` (callback OAuth): se aplicó la
+  misma normalización (trim + minúsculas en email, colapso de espacios en
+  nombre) a los datos que llegan de Google/GitHub, para consistencia con los
+  dos formularios anteriores.
+- Nuevo helper compartido `InputNormalization` (`DTOs/InputNormalization.cs`)
+  para no duplicar la lógica de trim/normalización entre DTOs.
+**Documentación actualizada:** `docs/API.md` (reglas de validación de
+`POST /auth/register` y `POST /databases`) y la guía de creación de bases de
+datos para Docusaurus.
+**Nota:** esto es una capa adicional de defensa en profundidad, no reemplaza
+las protecciones existentes (parámetros tipados + escape de identificadores
+por motor), que ya eran correctas.
+
+---
+
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
@@ -543,3 +616,4 @@ flujo sin `redirect_uri_mismatch`.
 | 6 | `idempotencia.http` con endpoint obsoleto | ⚪ Cosmético | 🔴 Abierto |
 | 8 | Doc desactualizada sobre callback OAuth | ⚪ Ya corregido en esta revisión | 🟢 Resuelto |
 | 17 | `redirect_uri` de OAuth en `http://` en vez de `https://` detrás del reverse proxy (QA) — rompía el login completo | 🔴 Alta | 🟡 Fix entregado, pendiente confirmar en QA |
+| 18 | Validación de entrada débil en Email/FullName/DbName/Engine — endurecida | 🟡 Media (defensa en profundidad) | 🟢 Resuelto |

@@ -228,13 +228,11 @@ app.UseForwardedHeaders();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
+app.MapOpenApi();
     // Swagger UI sobre el documento OpenAPI generado, disponible en /swagger.
-    app.UseSwaggerUI(options => options.SwaggerEndpoint("/openapi/v1.json", "Colmena API"));
-    app.MapScalarApiReference();
-}
+app.UseSwaggerUI(options => options.SwaggerEndpoint("/openapi/v1.json", "Colmena API"));
+app.MapScalarApiReference();
+
 
 app.UseHttpsRedirection();
 

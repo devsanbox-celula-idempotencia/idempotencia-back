@@ -87,9 +87,16 @@ public class AuthController : ControllerBase
             throw new AuthException("No se pudo completar la autenticación externa.");
 
         var principal = result.Principal;
-        var providerUserId = principal.FindFirstValue(ClaimTypes.NameIdentifier);
-        var email = principal.FindFirstValue(ClaimTypes.Email);
-        var fullName = principal.FindFirstValue(ClaimTypes.Name) ?? email ?? string.Empty;
+        var providerUserId = principal.FindFirstValue(ClaimTypes.NameIdentifier)?.Trim();
+
+        // Aunque Google/GitHub son proveedores confiables, se normaliza igual
+        // que en los DTOs de registro/login (trim + minúsculas en el correo)
+        // para que un mismo usuario no termine con variantes de mayúsculas
+        // distintas según cómo haya iniciado sesión, y para no persistir
+        // espacios en blanco si el proveedor los incluyera.
+        var email = InputNormalization.NormalizeEmail(principal.FindFirstValue(ClaimTypes.Email));
+        var fullName = InputNormalization.CollapseSpaces(
+            principal.FindFirstValue(ClaimTypes.Name) ?? email);
 
         if (string.IsNullOrEmpty(providerUserId) || string.IsNullOrEmpty(email))
             throw new AuthException("El proveedor externo no entregó los datos mínimos (id/email).");
