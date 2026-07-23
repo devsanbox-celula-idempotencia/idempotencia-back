@@ -5,15 +5,49 @@ namespace idempotencia.DTOs;
 /// <summary>Datos de entrada para aprovisionar una nueva base de datos.</summary>
 public class CreateDatabaseRequest
 {
+    private string _engine = string.Empty;
+    private string _dbName = string.Empty;
+
     /// <summary>
     /// Motor solicitado: "SqlServer", "Postgres", "MySql" o "Mongo"
-    /// (ver <see cref="idempotencia.Models.DatabaseEngine"/>).
+    /// (ver <see cref="idempotencia.Models.DatabaseEngine"/>). El
+    /// <see cref="RegularExpressionAttribute"/> rechaza cualquier otro valor
+    /// con un 400 de validación estándar, antes de que llegue al factory de
+    /// provisioners (que igual lo valida de nuevo — defensa en profundidad).
     /// </summary>
-    [Required, MaxLength(20)]
-    public string Engine { get; set; } = string.Empty;
+    [Required(ErrorMessage = "El motor es obligatorio.")]
+    [MaxLength(20)]
+    [RegularExpression("^(SqlServer|Postgres|MySql|Mongo)$",
+        ErrorMessage = "Motor no soportado. Debe ser SqlServer, Postgres, MySql o Mongo.")]
+    public string Engine
+    {
+        get => _engine;
+        set => _engine = InputNormalization.TrimOrEmpty(value);
+    }
 
-    [Required, MaxLength(128)]
-    public string DbName { get; set; } = string.Empty;
+    /// <summary>
+    /// Nombre lógico de la BD elegido por el usuario (el backend le antepone
+    /// un prefijo por usuario antes de crearla físicamente). Restringido a
+    /// letras/dígitos/guion bajo, empezando por una letra: es exactamente el
+    /// juego de caracteres seguro como identificador en los 4 motores
+    /// soportados (SQL Server, Postgres, MySQL, Mongo) sin depender
+    /// únicamente del escape de identificadores que hace cada provisioner.
+    /// No es la única defensa contra SQL injection — todas las consultas al
+    /// catálogo usan parámetros tipados (<c>SqlParameter</c>) y los
+    /// provisioners citan identificadores (<c>QuoteIdentifier</c>/backticks/
+    /// comillas dobles según el motor) — pero validar el formato acá evita
+    /// que un nombre "raro" (espacios, comillas, punto y coma, backticks)
+    /// llegue siquiera a esa capa.
+    /// </summary>
+    [Required(ErrorMessage = "El nombre de la base de datos es obligatorio.")]
+    [MaxLength(128)]
+    [RegularExpression(@"^[a-zA-Z][a-zA-Z0-9_]{2,127}$",
+        ErrorMessage = "El nombre solo puede contener letras, números y guion bajo, debe empezar con una letra y tener al menos 3 caracteres.")]
+    public string DbName
+    {
+        get => _dbName;
+        set => _dbName = InputNormalization.TrimOrEmpty(value);
+    }
 
     /// <summary>
     /// Tope de conexiones simultáneas para el usuario/login de esta BD.

@@ -5,23 +5,65 @@ namespace idempotencia.DTOs;
 /// <summary>Datos de entrada para el registro por contraseña.</summary>
 public class RegisterRequest
 {
-    [Required, EmailAddress, MaxLength(150)]
-    public string Email { get; set; } = string.Empty;
+    private string _email = string.Empty;
+    private string _fullName = string.Empty;
 
-    [Required, MinLength(8), MaxLength(100)]
+    // [EmailAddress] ya valida el formato general; el [RegularExpression]
+    // adicional es más estricto a propósito (exige exactamente un "@" y un
+    // "." en el dominio, sin espacios) — defensa en profundidad ante formatos
+    // "técnicamente válidos" pero claramente mal escritos (ej. "a@b@c",
+    // "a@b."). El valor ya llega trimeado/en minúsculas por el setter de
+    // abajo, así que un correo con mayúsculas o espacios de más no genera un
+    // 400 innecesario ni crea una cuenta "distinta" por una diferencia
+    // cosmética.
+    [Required(ErrorMessage = "El correo es obligatorio.")]
+    [EmailAddress(ErrorMessage = "El correo no tiene un formato válido.")]
+    [RegularExpression(@"^[^@\s]+@[^@\s]+\.[^@\s]+$", ErrorMessage = "El correo no tiene un formato válido.")]
+    [MaxLength(150)]
+    public string Email
+    {
+        get => _email;
+        set => _email = InputNormalization.NormalizeEmail(value);
+    }
+
+    // A propósito NO se trimea/normaliza: un espacio en la contraseña puede
+    // ser intencional y parte de la clave real del usuario.
+    [Required(ErrorMessage = "La contraseña es obligatoria.")]
+    [MinLength(8, ErrorMessage = "La contraseña debe tener al menos 8 caracteres.")]
+    [MaxLength(100)]
     public string Password { get; set; } = string.Empty;
 
-    [Required, MaxLength(150)]
-    public string FullName { get; set; } = string.Empty;
+    // Letras (incluye acentos/ñ vía \p{L}), espacios, apóstrofes, guiones y
+    // puntos — cubre nombres compuestos y apellidos con partícula sin admitir
+    // dígitos ni símbolos de control/inyección. Rechaza un nombre de un solo
+    // carácter o vacío tras el trim.
+    [Required(ErrorMessage = "El nombre completo es obligatorio.")]
+    [MaxLength(150)]
+    [RegularExpression(@"^[\p{L}\p{M}][\p{L}\p{M} '\.\-]{1,148}[\p{L}\p{M}]$",
+        ErrorMessage = "El nombre solo puede contener letras, espacios, apóstrofes, guiones y puntos.")]
+    public string FullName
+    {
+        get => _fullName;
+        set => _fullName = InputNormalization.CollapseSpaces(value);
+    }
 }
 
 /// <summary>Datos de entrada para el login por contraseña.</summary>
 public class LoginRequest
 {
-    [Required, EmailAddress, MaxLength(150)]
-    public string Email { get; set; } = string.Empty;
+    private string _email = string.Empty;
 
-    [Required]
+    [Required(ErrorMessage = "El correo es obligatorio.")]
+    [EmailAddress(ErrorMessage = "El correo no tiene un formato válido.")]
+    [RegularExpression(@"^[^@\s]+@[^@\s]+\.[^@\s]+$", ErrorMessage = "El correo no tiene un formato válido.")]
+    [MaxLength(150)]
+    public string Email
+    {
+        get => _email;
+        set => _email = InputNormalization.NormalizeEmail(value);
+    }
+
+    [Required(ErrorMessage = "La contraseña es obligatoria.")]
     public string Password { get; set; } = string.Empty;
 }
 

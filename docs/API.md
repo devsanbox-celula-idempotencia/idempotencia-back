@@ -153,9 +153,15 @@ Anónimo · rate limit `auth` (10/min/IP)
 ```
 
 **Reglas de validación:**
-- `email`: requerido, formato email válido, máx. 150 caracteres.
-- `password`: requerido, mín. 8 y máx. 100 caracteres.
-- `fullName`: requerido, máx. 150 caracteres.
+- `email`: requerido, formato email válido (`algo@dominio.algo`, sin
+  espacios), máx. 150 caracteres. Se normaliza automáticamente a minúsculas
+  y sin espacios al inicio/final antes de validarse y guardarse — un mismo
+  correo con mayúsculas distintas no crea cuentas duplicadas.
+- `password`: requerido, mín. 8 y máx. 100 caracteres. No se recorta ni se
+  normaliza (los espacios, si los escribiste, son parte de la contraseña).
+- `fullName`: requerido, máx. 150 caracteres. Solo letras (con acentos/ñ),
+  espacios, apóstrofes, guiones y puntos — sin dígitos ni símbolos. Los
+  espacios repetidos se colapsan a uno solo automáticamente.
 
 **Respuesta `200 OK`:** un `AuthResponse` (sección 4), con `mySqlDatabase`
 poblado (primer login del usuario, siempre — es su registro).
@@ -315,8 +321,8 @@ repetirse en bucle.
 
 | Campo | Requerido | Notas |
 |---|---|---|
-| `engine` | Sí | `"SqlServer"`, `"Postgres"`, `"MySql"` o `"Mongo"`. Los 4 tienen provisioner real (creación de usuario/rol + BD + permisos acotados a esa BD). Máx. 20 caracteres. |
-| `dbName` | Sí | Máx. 128 caracteres. El backend le antepone un prefijo por usuario (ej. `colmena_u12_...`). |
+| `engine` | Sí | `"SqlServer"`, `"Postgres"`, `"MySql"` o `"Mongo"` — valor exacto, sensible a mayúsculas/minúsculas. Los 4 tienen provisioner real (creación de usuario/rol + BD + permisos acotados a esa BD). Máx. 20 caracteres. |
+| `dbName` | Sí | Solo letras, números y guion bajo, debe **empezar con una letra** y tener al menos 3 caracteres (máx. 128). Sin espacios ni símbolos — se valida así a propósito para no arriesgar caracteres raros en la construcción del DDL de cada motor. El backend le antepone un prefijo por usuario (ej. `colmena_u12_...`). |
 | `maxConcurrentConnections` | No | Entero 1-100. Si se omite, usa el default del motor (hoy 5). El backend SIEMPRE lo acota a un tope duro por motor (hoy 20) sin importar lo que pidas. Solo tiene efecto real en **MySQL** y **Postgres**; en **SqlServer**/**Mongo** se ignora (`bugs.md` ítem 12). |
 
 > No necesitas llamar este endpoint para tu primera BD MySQL si entraste por
