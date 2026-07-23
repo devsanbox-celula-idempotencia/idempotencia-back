@@ -342,30 +342,104 @@ identificador de 64 caracteres de MySQL una vez aplicado el prefijo por
 usuario — no se cambió en esta sesión para no alterar un límite ya
 documentado públicamente sin coordinarlo primero.
 
+---
+
+## Sesión 7 — 2026-07-22 (ciclo de vida manual de bases de datos: detalle, desactivar, eliminar, reset de contraseña por correo)
+
+**Pedido:** el usuario preguntó cómo ven los usuarios los datos de su BD, y
+pidió: un endpoint de detalle para cuando se pierden las credenciales, un
+endpoint para desactivar la BD, poder eliminarla solo si ya está inactiva, y
+resetear la contraseña enviando la nueva por correo.
+
+**Decisiones confirmadas con el usuario antes de implementar** (vía
+pregunta): SMTP de Gmail/Workspace para el correo; desactivar = revocar
+acceso físico real (no solo un flag); eliminar = borrado físico real
+(irreversible).
+
+**Qué se hizo:**
+
+1. **Respuesta conceptual**: los usuarios ven los datos de su BD conectándose
+   directo al motor con su propio cliente (MySQL Workbench, pgAdmin, Compass,
+   SSMS, etc.) usando `host`/`port`/`loginName`/`password` — el backend nunca
+   actúa como proxy de datos.
+2. **4 endpoints nuevos en `DatabasesController`**: `GET /databases/{id}`
+   (detalle, sin password), `POST /databases/{id}/deactivate` (revoca acceso
+   físico), `DELETE /databases/{id}` (borrado físico real, solo si
+   `Inactive`), `POST /databases/{id}/reset-password` (nueva contraseña
+   enviada SOLO por correo, nunca en la respuesta HTTP).
+3. **`IDatabaseProvisioner` extendido** (los 4 provisioners): `Host`/`Port`
+   como propiedades (derivadas de config, no del catálogo — el host/puerto es
+   el mismo para todas las BDs de un motor/ambiente), `ChangePasswordAsync` y
+   `DeactivateAsync` (implementados con `ALTER LOGIN`/`ACCOUNT LOCK`/`NOLOGIN`/
+   vaciar roles de Mongo según el motor).
+4. **Servicio de correo nuevo**: `IEmailService`/`SmtpEmailService` (MailKit,
+   no `System.Net.Mail` que está desaconsejado), `EmailSettings` (sección
+   `Email` en `appsettings.json`, hoy con placeholders), `EmailTemplates`
+   (HTML del correo de reset de contraseña).
+5. **`NotFoundException` (404)** nueva en `Middleware/AppExceptions.cs` — "no
+   existe" y "no es tuyo" devuelven el mismo mensaje a propósito.
+6. **4 Stored Procedures nuevos** entregados como script
+   ([`sql/2026-07-22_database_lifecycle_sps.sql`](../sql/2026-07-22_database_lifecycle_sps.sql),
+   no versionados como parte de la app por la arquitectura database-centric):
+   `sp_GetDatabaseDetail`, `sp_DeactivateDatabase`, `sp_DeleteDatabase`,
+   `sp_ResetDatabasePassword`. Asumen que `ProvisionedDatabases` ya tiene una
+   columna `LoginName` (el script trae instrucciones de `ALTER TABLE` si no).
+7. **Corrección menor de paso**: `POST /databases` armaba mal el header
+   `Location` (apuntaba a `GetMine`, que no acepta `id`) — ahora apunta a
+   `GetDetail`, que sí es un endpoint de recurso único.
+8. **Docs actualizados**: `routes.md` (13 endpoints de negocio, antes 9),
+   `API.md` (secciones 6.3–6.6 nuevas + auditoría de datos sensibles),
+   `bugs.md` (ítem 19, nuevo).
+
+**Pendiente — 2 pasos manuales antes de que esto funcione en un ambiente
+real** (ninguno lo puede hacer el backend solo):
+1. Correr el script SQL contra la base real.
+2. Configurar `Email` en `appsettings.json` con una cuenta SMTP real (App
+   Password de Google, no la contraseña normal) — idealmente vía User
+   Secrets/variables de entorno, no en texto plano (mismo criterio que el
+   ítem 3 de `bugs.md`).
+
+Después de eso, confirmar en vivo los 4 endpoints.
+
 ## Backlog / próximos pasos
 
-1. **Confirmar en vivo el fix del ítem 17** (`redirect_uri_mismatch` en QA)
+1. **Desplegar `sql/2026-07-22_database_lifecycle_sps.sql`** contra la BD
+   real (`sp_GetDatabaseDetail`, `sp_DeactivateDatabase`, `sp_DeleteDatabase`,
+   `sp_ResetDatabasePassword`) y confirmar que `ProvisionedDatabases` tiene
+   columna `LoginName` (ver notas del script) — sin esto los 4 endpoints
+   nuevos de la sesión 7 devuelven `500`.
+2. **Configurar la sección `Email` de `appsettings.json`** con una cuenta
+   SMTP real (App Password de Google u otro proveedor) para que
+   `POST /databases/{id}/reset-password` pueda enviar correos — hoy tiene
+   placeholders. Idealmente vía User Secrets/variables de entorno.
+3. **Confirmar en vivo los 4 endpoints nuevos** (detalle, desactivar,
+   eliminar, reset de contraseña) tras los dos pasos anteriores — ítem 19 de
+   `bugs.md`, mover de 🟡 a 🟢.
+4. **Confirmar en vivo el fix del ítem 17** (`redirect_uri_mismatch` en QA)
    tras desplegar — mover de 🟡 a 🟢 en `bugs.md`.
-2. **Confirmar en vivo el fix de `sp_UpsertExternalLogin`** (ítem 9) tras
+5. **Confirmar en vivo el fix de `sp_UpsertExternalLogin`** (ítem 9) tras
    aplicar el `ALTER PROCEDURE` en la BD real — probar un login OAuth
    completo de punta a punta.
-3. **Evaluar bajar el `MaxLength` de `CreateDatabaseRequest.DbName`** (hoy
+6. **Evaluar bajar el `MaxLength` de `CreateDatabaseRequest.DbName`** (hoy
    128) para dejar margen bajo el límite de identificador de 64 caracteres
-   de MySQL una vez concatenado el prefijo por usuario — no se tocó en la
-   sesión 6 para no alterar un límite ya documentado públicamente sin
-   coordinarlo antes.
-4. **Ciclo de vida (TTL)**: implementar `sp_GetIdleDatabases`,
-   `sp_PauseDatabase`, `sp_DeleteDatabase` + `DatabaseLifecycleJob` — ítem 11
-   de `bugs.md`.
-5. **Cuota de almacenamiento real** para Postgres/MySQL/Mongo — ítem 10 de
+   de MySQL una vez concatenado el prefijo por usuario.
+7. **Ciclo de vida automático (TTL)**: implementar `sp_GetIdleDatabases` +
+   `DatabaseLifecycleJob` (`IHostedService`) que detecte inactividad y
+   reutilice `sp_DeactivateDatabase`/`sp_DeleteDatabase` (ya existen desde la
+   sesión 7) en vez de crear SPs nuevas con otro nombre — ítem 11 de
+   `bugs.md`, actualizado para no duplicar los SPs manuales.
+8. **Endpoint de "reactivar" una BD desactivada** (`ENABLE`/`ACCOUNT UNLOCK`/
+   `LOGIN` según el motor) — no se pidió en la sesión 7, hoy desactivar es
+   unidireccional hacia eliminar.
+9. **Cuota de almacenamiento real** para Postgres/MySQL/Mongo — ítem 10 de
    `bugs.md`.
-6. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
-   ítem 12 de `bugs.md`.
-7. Token JWT (y PII) viaja en query string en el redirect OAuth — ítems 1 y
-   15 de `bugs.md`.
-8. Secretos reales en texto plano en `appsettings.json` — ítem 3 de
-   `bugs.md`.
-9. Vulnerabilidad conocida en `Microsoft.OpenApi` — ítem 4 de `bugs.md`.
-10. Sin rate limit dedicado en los 4 endpoints OAuth — ítem 2 de `bugs.md`.
-11. `CurrentSizeMB` sin tipo de columna explícito en EF Core — ítem 5 de
+10. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
+    ítem 12 de `bugs.md`.
+11. Token JWT (y PII) viaja en query string en el redirect OAuth — ítems 1 y
+    15 de `bugs.md`.
+12. Secretos reales en texto plano en `appsettings.json` — ítem 3 de
+    `bugs.md`.
+13. Vulnerabilidad conocida en `Microsoft.OpenApi` — ítem 4 de `bugs.md`.
+14. Sin rate limit dedicado en los 4 endpoints OAuth — ítem 2 de `bugs.md`.
+15. `CurrentSizeMB` sin tipo de columna explícito en EF Core — ítem 5 de
     `bugs.md`.

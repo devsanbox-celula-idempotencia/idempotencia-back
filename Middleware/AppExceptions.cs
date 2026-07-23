@@ -23,3 +23,17 @@ public class AuthException : AppException
     {
     }
 }
+
+/// <summary>
+/// Recurso inexistente O que no pertenece al usuario autenticado (404). Se
+/// usa el mismo mensaje/código para ambos casos a propósito — no hay que
+/// revelarle a un usuario si el <c>databaseId</c> que probó existe pero es de
+/// otra persona (evita enumeración de IDs ajenos).
+/// </summary>
+public class NotFoundException : AppException
+{
+    public NotFoundException(string message)
+        : base(message, StatusCodes.Status404NotFound)
+    {
+    }
+}

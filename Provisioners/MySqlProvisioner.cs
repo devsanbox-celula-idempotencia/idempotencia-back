@@ -19,6 +19,8 @@ public class MySqlProvisioner : IDatabaseProvisioner
     private readonly int _port;
 
     public string Engine => DatabaseEngine.MySql;
+    public string Host => _host;
+    public int Port => _port;
 
     public MySqlProvisioner(IConfiguration config)
     {
@@ -61,6 +63,26 @@ public class MySqlProvisioner : IDatabaseProvisioner
 
         await ExecAsync(conn, $"DROP DATABASE IF EXISTS {QuoteIdentifier(dbName)}", ct);
         await ExecAsync(conn, $"DROP USER IF EXISTS {QuoteLiteral(login)}@'%'", ct);
+    }
+
+    public async Task ChangePasswordAsync(string dbName, string login, string newPassword, CancellationToken ct = default)
+    {
+        await using var conn = new MySqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        var user = $"{QuoteLiteral(login)}@'%'";
+        await ExecAsync(conn, $"ALTER USER {user} IDENTIFIED BY {QuoteLiteral(newPassword)}", ct);
+    }
+
+    public async Task DeactivateAsync(string dbName, string login, CancellationToken ct = default)
+    {
+        await using var conn = new MySqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        var user = $"{QuoteLiteral(login)}@'%'";
+        // ACCOUNT LOCK impide iniciar sesión sin borrar el usuario ni sus
+        // privilegios — reversible con ACCOUNT UNLOCK si se agrega "reactivar".
+        await ExecAsync(conn, $"ALTER USER {user} ACCOUNT LOCK", ct);
     }
 
     private static async Task ExecAsync(MySqlConnection conn, string sql, CancellationToken ct)

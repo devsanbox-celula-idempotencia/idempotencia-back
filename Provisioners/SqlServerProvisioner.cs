@@ -18,6 +18,8 @@ public class SqlServerProvisioner : IDatabaseProvisioner
     private readonly int _port;
 
     public string Engine => DatabaseEngine.SqlServer;
+    public string Host => _host;
+    public int Port => _port;
 
     public SqlServerProvisioner(IConfiguration config)
     {
@@ -90,6 +92,29 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         // Borra el login si existe.
         await ExecAsync(conn,
             $"IF SUSER_ID({QuoteLiteral(login)}) IS NOT NULL DROP LOGIN {lg};", ct);
+    }
+
+    public async Task ChangePasswordAsync(string dbName, string login, string newPassword, CancellationToken ct = default)
+    {
+        var lg = QuoteIdentifier(login);
+
+        await using var conn = new SqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        await ExecAsync(conn, $"ALTER LOGIN {lg} WITH PASSWORD = {QuoteLiteral(newPassword)};", ct);
+    }
+
+    public async Task DeactivateAsync(string dbName, string login, CancellationToken ct = default)
+    {
+        var lg = QuoteIdentifier(login);
+
+        await using var conn = new SqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        // DISABLE impide iniciar sesión con ese login sin borrar el usuario ni
+        // sus permisos dentro de la BD — reversible con ENABLE si en el futuro
+        // se agrega un endpoint de reactivar.
+        await ExecAsync(conn, $"ALTER LOGIN {lg} DISABLE;", ct);
     }
 
     private static async Task ExecAsync(SqlConnection conn, string sql, CancellationToken ct)

@@ -1,5 +1,7 @@
 using idempotencia.DTOs;
 using idempotencia.Interfaces;
+using idempotencia.Middleware;
+using idempotencia.Models;
 
 namespace idempotencia.Services;
 
@@ -7,24 +9,29 @@ namespace idempotencia.Services;
 /// Orquesta el aprovisionamiento multi-motor. Coordina el catálogo (SPs de
 /// control) con el provisioner físico del motor. La lógica de negocio (cuotas,
 /// límites, nombres) vive en el SP <c>sp_ReserveDatabase</c>; aquí solo se
-/// coordina el flujo reservar → crear → confirmar / revertir.
+/// coordina el flujo reservar → crear → confirmar / revertir. También
+/// orquesta el ciclo de vida posterior (detalle, desactivar, eliminar, reset
+/// de contraseña).
 /// </summary>
 public class DatabaseProvisioningService : IDatabaseProvisioningService
 {
     private readonly IDatabaseRepository _repo;
     private readonly IDatabaseProvisionerFactory _factory;
     private readonly IConfiguration _config;
+    private readonly IEmailService _email;
     private readonly ILogger<DatabaseProvisioningService> _logger;
 
     public DatabaseProvisioningService(
         IDatabaseRepository repo,
         IDatabaseProvisionerFactory factory,
         IConfiguration config,
+        IEmailService email,
         ILogger<DatabaseProvisioningService> logger)
     {
         _repo = repo;
         _factory = factory;
         _config = config;
+        _email = email;
         _logger = logger;
     }
 
@@ -102,6 +109,110 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
             throw; // se propaga al middleware para la respuesta de error uniforme
         }
     }
+
+    public async Task<DatabaseDetailResponse> GetDetailAsync(
+        int userId, int databaseId, CancellationToken ct = default)
+    {
+        var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)
+            ?? throw new NotFoundException("Base de datos no encontrada.");
+
+        var provisioner = _factory.Get(detail.Engine);
+        return MapToDetailResponse(detail, provisioner);
+    }
+
+    public async Task<DatabaseDetailResponse> DeactivateAsync(
+        int userId, int databaseId, CancellationToken ct = default)
+    {
+        var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)
+            ?? throw new NotFoundException("Base de datos no encontrada.");
+
+        if (!string.Equals(detail.Status, "Active", StringComparison.OrdinalIgnoreCase))
+            throw new AppException(
+                "Solo se puede desactivar una base de datos que esté activa.",
+                StatusCodes.Status400BadRequest);
+
+        var provisioner = _factory.Get(detail.Engine);
+
+        // Revoca el acceso físico PRIMERO; si esto falla, el catálogo sigue
+        // reflejando la realidad (la BD sigue Active) en vez de quedar
+        // desincronizado.
+        await provisioner.DeactivateAsync(detail.DbName, detail.LoginName, ct);
+        await _repo.DeactivateDatabaseAsync(databaseId, userId, ct);
+
+        detail.Status = "Inactive";
+        detail.PausedAt = DateTime.UtcNow;
+        return MapToDetailResponse(detail, provisioner);
+    }
+
+    public async Task DeleteAsync(int userId, int databaseId, CancellationToken ct = default)
+    {
+        var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)
+            ?? throw new NotFoundException("Base de datos no encontrada.");
+
+        if (!string.Equals(detail.Status, "Inactive", StringComparison.OrdinalIgnoreCase))
+            throw new AppException(
+                "La base de datos debe estar inactiva antes de poder eliminarla. " +
+                "Desactívala primero con POST /databases/{id}/deactivate.",
+                StatusCodes.Status400BadRequest);
+
+        var provisioner = _factory.Get(detail.Engine);
+
+        // Borrado físico real (irreversible). Se marca en el catálogo recién
+        // después de que el motor confirme el borrado.
+        await provisioner.DropAsync(detail.DbName, detail.LoginName, ct);
+        await _repo.MarkDatabaseDeletedAsync(databaseId, userId, ct);
+    }
+
+    public async Task ResetPasswordAsync(
+        int userId, int databaseId, string userEmail, string userFullName, CancellationToken ct = default)
+    {
+        var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)
+            ?? throw new NotFoundException("Base de datos no encontrada.");
+
+        if (!string.Equals(detail.Status, "Active", StringComparison.OrdinalIgnoreCase))
+            throw new AppException(
+                "Solo se puede restablecer la contraseña de una base de datos activa.",
+                StatusCodes.Status400BadRequest);
+
+        var provisioner = _factory.Get(detail.Engine);
+        var newPassword = PasswordGenerator.Generate();
+
+        // Cambia la contraseña física PRIMERO; si falla, la contraseña
+        // anterior sigue siendo la válida y no se toca el catálogo.
+        await provisioner.ChangePasswordAsync(detail.DbName, detail.LoginName, newPassword, ct);
+
+        var passwordHash = BCrypt.Net.BCrypt.HashPassword(newPassword);
+        await _repo.ResetDatabasePasswordAsync(databaseId, userId, passwordHash, ct);
+
+        // El correo es la ÚNICA forma en que el usuario recibe esta
+        // contraseña — a propósito no se devuelve en la respuesta HTTP (no
+        // queda en logs de acceso/historial del navegador). Si el envío
+        // falla, SÍ se propaga la excepción (mapea a 500 genérico): la
+        // contraseña física ya cambió, así que el usuario debe enterarse de
+        // que algo salió mal para poder reintentar o contactar soporte, en
+        // vez de quedarse bloqueado sin saberlo.
+        var subject = $"Colmena — nueva contraseña para {detail.DbName}";
+        var body = EmailTemplates.DatabasePasswordReset(detail, newPassword);
+        await _email.SendAsync(userEmail, userFullName, subject, body, ct);
+    }
+
+    private static DatabaseDetailResponse MapToDetailResponse(
+        ProvisionedDatabaseDetail detail, IDatabaseProvisioner provisioner) => new()
+    {
+        DatabaseId = detail.DatabaseId,
+        Engine = detail.Engine,
+        DbName = detail.DbName,
+        Status = detail.Status,
+        Host = provisioner.Host,
+        Port = provisioner.Port,
+        LoginName = detail.LoginName,
+        MaxStorageMB = detail.MaxStorageMB,
+        CurrentSizeMB = detail.CurrentSizeMB,
+        LastActivityAt = detail.LastActivityAt,
+        CreatedAt = detail.CreatedAt,
+        PausedAt = detail.PausedAt,
+        DeletedAt = detail.DeletedAt
+    };
 
     /// <summary>
     /// Lee <c>Provisioning:{Engine}:MaxConcurrentConnections</c> (default,

@@ -18,6 +18,8 @@ public class PostgresProvisioner : IDatabaseProvisioner
     private readonly int _port;
 
     public string Engine => DatabaseEngine.Postgres;
+    public string Host => _host;
+    public int Port => _port;
 
     public PostgresProvisioner(IConfiguration config)
     {
@@ -64,6 +66,25 @@ public class PostgresProvisioner : IDatabaseProvisioner
 
         await ExecAsync(conn, $"DROP DATABASE IF EXISTS {QuoteIdentifier(dbName)}", ct);
         await ExecAsync(conn, $"DROP ROLE IF EXISTS {QuoteIdentifier(login)}", ct);
+    }
+
+    public async Task ChangePasswordAsync(string dbName, string login, string newPassword, CancellationToken ct = default)
+    {
+        await using var conn = new NpgsqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        await ExecAsync(conn,
+            $"ALTER ROLE {QuoteIdentifier(login)} WITH PASSWORD {QuoteLiteral(newPassword)}", ct);
+    }
+
+    public async Task DeactivateAsync(string dbName, string login, CancellationToken ct = default)
+    {
+        await using var conn = new NpgsqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        // NOLOGIN impide iniciar sesión sin borrar el rol ni sus privilegios —
+        // reversible con LOGIN si se agrega "reactivar".
+        await ExecAsync(conn, $"ALTER ROLE {QuoteIdentifier(login)} NOLOGIN", ct);
     }
 
     private static async Task ExecAsync(NpgsqlConnection conn, string sql, CancellationToken ct)

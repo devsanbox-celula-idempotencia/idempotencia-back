@@ -30,6 +30,9 @@ var jwtSettings = builder.Configuration
 builder.Services.Configure<FrontendSettings>(
     builder.Configuration.GetSection(FrontendSettings.SectionName));
 
+builder.Services.Configure<EmailSettings>(
+    builder.Configuration.GetSection(EmailSettings.SectionName));
+
 
 builder.Services.AddDbContext<ColmenaDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("Colmena")));
@@ -41,6 +44,7 @@ builder.Services.AddScoped<IStatisticsRepository, StatisticsRepository>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 builder.Services.AddSingleton<IOAuthRedirectBuilder, OAuthRedirectBuilder>();
+builder.Services.AddScoped<IEmailService, SmtpEmailService>();
 
 // Aprovisionamiento multi-motor: servicio orquestador + factory + un provisioner
 // por motor (patrón Strategy). Se registran todos como IDatabaseProvisioner y el

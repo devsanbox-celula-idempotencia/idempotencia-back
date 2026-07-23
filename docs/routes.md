@@ -34,6 +34,10 @@
 | GET | `/auth/github/callback` | Anónimo (cookie `External`) | Solo global | ⚠️ Código completo; depende de `sp_UpsertExternalLogin` (sin confirmar en vivo) | Igual que Google callback — sin auto-aprovisionamiento (hallazgo 9). |
 | POST | `/databases` (cualquier `engine`) | JWT Bearer | **`db-provisioning` (5/min/usuario)** | ⚠️ Código completo; depende de `sp_ReserveDatabase` / `sp_ConfirmDatabase` / `sp_FailDatabase` | **Los 4 motores (`SqlServer`, `Postgres`, `MySql`, `Mongo`) tienen provisioner real implementado** (ver hallazgo 5 — esta fila corrige la versión anterior de esta tabla, que los describía como stubs). Rate limit dedicado agregado en esta revisión (antes solo el global). |
 | GET | `/databases` | JWT Bearer | Solo global | ⚠️ Código completo; depende de `sp_GetUserDatabases` | Lista las BDs del usuario autenticado (claim `UserId`). |
+| GET | `/databases/{id}` | JWT Bearer | Solo global | 🆕 Código completo; depende de `sp_GetDatabaseDetail` (nuevo, sin desplegar) | Detalle de una BD puntual (host/puerto/usuario/estado, nunca la contraseña) — para cuando el usuario perdió sus datos de conexión. 404 si no existe o no es del usuario (mismo mensaje para ambos casos, evita enumeración). |
+| POST | `/databases/{id}/deactivate` | JWT Bearer | `db-provisioning` (5/min/usuario) | 🆕 Código completo; depende de `sp_DeactivateDatabase` (nuevo, sin desplegar) | Revoca el acceso físico (login/usuario deshabilitado en el motor) sin borrar datos. Requiere que la BD esté `Active`; si no, `400`. Paso obligatorio antes de `DELETE`. |
+| DELETE | `/databases/{id}` | JWT Bearer | `db-provisioning` (5/min/usuario) | 🆕 Código completo; depende de `sp_DeleteDatabase` (nuevo, sin desplegar) | Borrado físico real (irreversible) — solo permitido si la BD ya está `Inactive`; si no, `400`. |
+| POST | `/databases/{id}/reset-password` | JWT Bearer | `db-provisioning` (5/min/usuario) | 🆕 Código completo; depende de `sp_ResetDatabasePassword` (nuevo, sin desplegar) + SMTP configurado | Genera una contraseña nueva, la aplica en el motor y la envía por correo al usuario — la respuesta HTTP nunca incluye la contraseña. Requiere que la BD esté `Active`. |
 | GET | `/statistics` | JWT Bearer + rol `Admin` | Solo global | ⚠️ Código completo; depende de `sp_GetPlatformStatistics` | Requiere token con rol `Admin` (401 sin token/expirado, 403 sin rol). No verificado contra la BD real (ver nota de conectividad). |
 
 ## Rutas de infraestructura (no de negocio)
@@ -44,10 +48,11 @@
 | `/swagger` | Solo Development | ✅ Swagger UI. |
 | `/scalar` (Scalar API reference) | Solo Development | ✅ Mapeado vía `MapScalarApiReference()`. |
 
-## Total de endpoints de negocio: 9
+## Total de endpoints de negocio: 13
 
 - 6 en `AuthController` (`/auth/...`)
-- 2 en `DatabasesController` (`/databases`)
+- 6 en `DatabasesController` (`/databases...`) — incluye los 4 nuevos de
+  detalle/desactivar/eliminar/reset de contraseña (sesión 7, ver `claude.md`)
 - 1 en `StatisticsController` (`/statistics`)
 
 ## Hallazgos relevantes para esta tabla
@@ -105,6 +110,18 @@
 10. **`POST /databases` ahora acepta `maxConcurrentConnections` opcional**
     (a pedido del usuario), acotado siempre a un cap por motor — ver `API.md`
     §6.1 y `bugs.md` ítem 12.
+11. **Ciclo de vida manual de bases de datos** (a pedido del usuario): se
+    agregaron `GET /databases/{id}`, `POST /databases/{id}/deactivate`,
+    `DELETE /databases/{id}` y `POST /databases/{id}/reset-password`. Código
+    completo (`Controllers/DatabasesController.cs`,
+    `Services/DatabaseProvisioningService.cs`, `Interfaces/IDatabaseProvisioner.cs`
+    extendido con `Host`/`Port`/`ChangePasswordAsync`/`DeactivateAsync` en los
+    4 provisioners), pero **depende de 4 SPs nuevos que todavía no están
+    desplegados** en la base real
+    ([`sql/2026-07-22_database_lifecycle_sps.sql`](../sql/2026-07-22_database_lifecycle_sps.sql))
+    y de la sección `Email` (SMTP) en `appsettings.json`, que hoy tiene
+    placeholders — **no funcionará hasta que ambas cosas se configuren**. Ver
+    `docs/bugs.md` (nuevo hallazgo) y la bitácora en `docs/claude.md`.
 
 ## Mantenimiento de este documento
 

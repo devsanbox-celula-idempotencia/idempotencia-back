@@ -61,4 +61,48 @@ public class DatabaseRepository : IDatabaseRepository
 
         return result;
     }
+
+    public async Task<ProvisionedDatabaseDetail?> GetDatabaseDetailAsync(
+        int databaseId, int userId, CancellationToken ct = default)
+    {
+        var pDatabaseId = new SqlParameter("@DatabaseId", System.Data.SqlDbType.Int) { Value = databaseId };
+        var pUserId = new SqlParameter("@UserId", System.Data.SqlDbType.Int) { Value = userId };
+
+        var result = await _db.ProvisionedDatabaseDetails
+            .FromSqlRaw("EXEC sp_GetDatabaseDetail @DatabaseId, @UserId", pDatabaseId, pUserId)
+            .AsNoTracking()
+            .ToListAsync(ct);
+
+        return result.FirstOrDefault();
+    }
+
+    public async Task DeactivateDatabaseAsync(int databaseId, int userId, CancellationToken ct = default)
+    {
+        var pDatabaseId = new SqlParameter("@DatabaseId", System.Data.SqlDbType.Int) { Value = databaseId };
+        var pUserId = new SqlParameter("@UserId", System.Data.SqlDbType.Int) { Value = userId };
+
+        await _db.Database.ExecuteSqlRawAsync(
+            "EXEC sp_DeactivateDatabase @DatabaseId, @UserId", new object[] { pDatabaseId, pUserId }, ct);
+    }
+
+    public async Task MarkDatabaseDeletedAsync(int databaseId, int userId, CancellationToken ct = default)
+    {
+        var pDatabaseId = new SqlParameter("@DatabaseId", System.Data.SqlDbType.Int) { Value = databaseId };
+        var pUserId = new SqlParameter("@UserId", System.Data.SqlDbType.Int) { Value = userId };
+
+        await _db.Database.ExecuteSqlRawAsync(
+            "EXEC sp_DeleteDatabase @DatabaseId, @UserId", new object[] { pDatabaseId, pUserId }, ct);
+    }
+
+    public async Task ResetDatabasePasswordAsync(
+        int databaseId, int userId, string newPasswordHash, CancellationToken ct = default)
+    {
+        var pDatabaseId = new SqlParameter("@DatabaseId", System.Data.SqlDbType.Int) { Value = databaseId };
+        var pUserId = new SqlParameter("@UserId", System.Data.SqlDbType.Int) { Value = userId };
+        var pHash = new SqlParameter("@PasswordHash", System.Data.SqlDbType.NVarChar, 255) { Value = newPasswordHash };
+
+        await _db.Database.ExecuteSqlRawAsync(
+            "EXEC sp_ResetDatabasePassword @DatabaseId, @UserId, @PasswordHash",
+            new object[] { pDatabaseId, pUserId, pHash }, ct);
+    }
 }
