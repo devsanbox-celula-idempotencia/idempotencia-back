@@ -62,6 +62,8 @@ que el frontend sepa qué es seguro loguear/persistir y qué no:
 | PII en el redirect OAuth | `email`, `fullName`, `role`, `userId`, `token` en la query string | **Hallazgo abierto** — ver `docs/bugs.md` ítems 1 y 15. El navegador guarda esto en su historial y puede quedar en logs de acceso del servidor/proxy. Limpia la URL (`history.replaceState`) apenas la leas (ver sección 4.3). |
 | Stack traces / detalles internos de excepciones | — | Nunca se exponen. Todo error no controlado devuelve un mensaje genérico (`"Ocurrió un error inesperado."` o `"Ocurrió un error al procesar la solicitud."`); el detalle real solo queda en los logs del servidor. |
 | `PasswordHash` de usuarios | — | Nunca se serializa en ninguna respuesta; se usa solo internamente para verificar con BCrypt. |
+| Contraseña nueva de `POST /databases/{id}/reset-password` | Correo electrónico del usuario (SMTP) | **Alta sensibilidad** — a propósito NO viaja en la respuesta HTTP (ver sección 6.6), solo por correo, para no dejarla en historial de red/logs de acceso. El frontend no debe esperar un campo `password` en esta respuesta. |
+| `loginName` en `GET /databases/{id}` | `DatabaseDetailResponse` | Bajo riesgo — es tu propio usuario de conexión, no una contraseña. Se reexpone a propósito para el caso de "perdí mis datos de conexión". |
 
 ---
 
@@ -406,6 +408,128 @@ usuario las perdió, hoy no existe un endpoint para regenerarlas (ver
 
 ---
 
+### 6.3 Detalle de una base de datos
+
+```
+GET /databases/{id}
+```
+JWT Bearer
+
+Pensado para cuando el usuario perdió sus datos de conexión (host, puerto,
+usuario) y necesita volver a verlos. **Nunca** incluye `password` — no se
+puede recuperar (el backend solo guarda el hash); para eso existe la sección
+6.6 (reset de contraseña).
+
+**Respuesta `200 OK`:**
+```json
+{
+  "databaseId": 5,
+  "engine": "SqlServer",
+  "dbName": "colmena_u12_proyecto_ana",
+  "status": "Active",
+  "host": "100.99.206.50",
+  "port": 1433,
+  "loginName": "usr_colmena_u12_proyecto_ana",
+  "maxStorageMB": 20,
+  "currentSizeMB": 3.5,
+  "lastActivityAt": "2026-07-16T12:00:00Z",
+  "createdAt": "2026-07-01T09:00:00Z",
+  "pausedAt": null,
+  "deletedAt": null
+}
+```
+
+**Errores/excepciones posibles:**
+| Código | Cuándo | Mensaje |
+|---|---|---|
+| `401` | Falta el token, es inválido o expiró | — |
+| `404` | El `id` no existe, o existe pero es de otro usuario | `"Base de datos no encontrada."` — mismo mensaje para ambos casos a propósito, para no revelar si un ID ajeno existe |
+
+---
+
+### 6.4 Desactivar una base de datos
+
+```
+POST /databases/{id}/deactivate
+```
+JWT Bearer · rate limit `db-provisioning` (5/min/usuario)
+
+Revoca el acceso físico (deshabilita el login/usuario en el motor) **sin
+borrar los datos**. Requiere que la BD esté `Active`. Es el paso obligatorio
+antes de poder eliminarla (sección 6.5) — hoy no hay un endpoint para
+reactivarla, trátalo como una confirmación intermedia antes del borrado
+definitivo, no como una acción trivialmente reversible desde la API.
+
+**Respuesta `200 OK`:** el mismo shape que la sección 6.3, con
+`"status": "Inactive"` y `pausedAt` poblado.
+
+**Errores/excepciones posibles:**
+| Código | Cuándo | Mensaje |
+|---|---|---|
+| `401` | Falta el token, es inválido o expiró | — |
+| `404` | El `id` no existe o no es del usuario | `"Base de datos no encontrada."` |
+| `400` | La BD no está `Active` (ya inactiva o eliminada) | `"Solo se puede desactivar una base de datos que esté activa."` |
+| `429` | Más de 5 solicitudes/min de este usuario (comparte el límite con `POST /databases`) | `"Demasiadas solicitudes. Inténtalo más tarde."` |
+
+---
+
+### 6.5 Eliminar una base de datos
+
+```
+DELETE /databases/{id}
+```
+JWT Bearer · rate limit `db-provisioning` (5/min/usuario)
+
+Borrado **físico real** (DROP de la BD y del login/usuario en el motor) —
+irreversible. Solo permitido si la BD ya está `Inactive` (sección 6.4).
+
+**Respuesta `204 No Content`** (sin body) si se eliminó correctamente.
+
+**Errores/excepciones posibles:**
+| Código | Cuándo | Mensaje |
+|---|---|---|
+| `401` | Falta el token, es inválido o expiró | — |
+| `404` | El `id` no existe o no es del usuario | `"Base de datos no encontrada."` |
+| `400` | La BD no está `Inactive` | `"La base de datos debe estar inactiva antes de poder eliminarla. Desactívala primero con POST /databases/{id}/deactivate."` |
+| `429` | Más de 5 solicitudes/min de este usuario | `"Demasiadas solicitudes. Inténtalo más tarde."` |
+
+---
+
+### 6.6 Restablecer la contraseña de una base de datos
+
+```
+POST /databases/{id}/reset-password
+```
+JWT Bearer · rate limit `db-provisioning` (5/min/usuario)
+
+Para cuando el usuario perdió/olvidó la contraseña de su BD (no se puede
+recuperar la anterior — solo se guarda el hash). Genera una contraseña nueva,
+la aplica en el motor físico y **la envía por correo** a la dirección
+registrada del usuario. Requiere que la BD esté `Active`.
+
+> ⚠️ A diferencia de `POST /databases` y del login, **la contraseña nueva NO
+> viaja en la respuesta HTTP** — solo llega por correo. Es intencional: evita
+> que quede en el historial de red del navegador o en logs de acceso. El
+> frontend debe mostrar un mensaje tipo "revisa tu correo", no esperar un
+> campo `password` en la respuesta.
+
+**Respuesta `200 OK`:**
+```json
+{ "status": 200, "message": "Se envió la nueva contraseña a tu correo." }
+```
+
+**Errores/excepciones posibles:**
+| Código | Cuándo | Mensaje |
+|---|---|---|
+| `401` | Falta el token, es inválido o expiró | — |
+| `401` | Token válido pero sin claim de correo legible | `"El token no contiene un correo válido."` |
+| `404` | El `id` no existe o no es del usuario | `"Base de datos no encontrada."` |
+| `400` | La BD no está `Active` | `"Solo se puede restablecer la contraseña de una base de datos activa."` |
+| `429` | Más de 5 solicitudes/min de este usuario | `"Demasiadas solicitudes. Inténtalo más tarde."` |
+| `500` | Falla el cambio físico en el motor, o falla el envío del correo (SMTP mal configurado/caído) — en ambos casos la operación se aborta o el usuario debe reintentar | genérico, sin detalle interno |
+
+---
+
 ## 7. Estadísticas de la plataforma (solo Admin)
 
 ```
@@ -583,6 +707,10 @@ async function getMyDatabases() {
 | `POST /databases` (los 4 motores) | ⚠️ Los 4 provisioners están implementados; depende de `sp_ReserveDatabase`/`sp_ConfirmDatabase`/`sp_FailDatabase`. Rate limit dedicado (5/min/usuario) y `maxConcurrentConnections` configurable agregados. |
 | Auto-aprovisionamiento MySQL en primer login/registro por contraseña | ✅ Implementado. NO aplica a OAuth (ver arriba). |
 | `GET /databases` | ⚠️ Código completo; depende de `sp_GetUserDatabases`. No confirmado si `currentSizeMB` refleja tamaño real (`bugs.md` ítem 10). |
+| `GET /databases/{id}` (detalle) | 🆕 Código completo; depende de `sp_GetDatabaseDetail`, **nuevo, todavía sin desplegar** en la BD real (ver `sql/2026-07-22_database_lifecycle_sps.sql`). |
+| `POST /databases/{id}/deactivate` | 🆕 Código completo; depende de `sp_DeactivateDatabase`, sin desplegar. Revoca acceso físico sin borrar datos. |
+| `DELETE /databases/{id}` | 🆕 Código completo; depende de `sp_DeleteDatabase`, sin desplegar. Borrado físico real, solo si la BD está `Inactive`. |
+| `POST /databases/{id}/reset-password` | 🆕 Código completo; depende de `sp_ResetDatabasePassword`, sin desplegar, **y de la sección `Email` (SMTP) en `appsettings.json`, hoy con placeholders sin credenciales reales** — no funcionará hasta configurarla. |
 | `GET /statistics` (solo Admin) | ⚠️ Código completo; depende de `sp_GetPlatformStatistics`, no verificado en vivo todavía. |
 
 **Aislamiento entre usuarios en el motor físico** (relevante si el frontend

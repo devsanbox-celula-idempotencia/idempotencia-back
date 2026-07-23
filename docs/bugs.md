@@ -591,6 +591,88 @@ por motor), que ya eran correctas.
 
 ---
 
+### 19. Ciclo de vida manual de bases de datos (detalle, desactivar, eliminar, reset de contraseña) — código completo, pendiente de desplegar
+**Estado:** 🟡 Fix entregado (código completo; requiere 2 pasos manuales antes
+de funcionar — ver "Pendiente" abajo).
+**Tipo:** Feature nueva, a pedido del usuario (no es un bug).
+**Motivación:** el usuario preguntó cómo ven los usuarios los datos de su BD
+(respuesta: conectándose directo al motor con su propio cliente, el backend
+nunca es un proxy de datos) y pidió cubrir el caso de credenciales perdidas:
+poder ver de nuevo los datos de conexión (sin la contraseña, irrecuperable),
+desactivar una BD, eliminarla solo si ya está inactiva, y resetear la
+contraseña enviándola por correo en vez de devolverla en la respuesta HTTP.
+**Dónde:**
+- `Controllers/DatabasesController.cs` — 4 endpoints nuevos:
+  `GET /databases/{id}`, `POST /databases/{id}/deactivate`,
+  `DELETE /databases/{id}`, `POST /databases/{id}/reset-password`.
+- `Services/DatabaseProvisioningService.cs` — orquestación
+  (`GetDetailAsync`/`DeactivateAsync`/`DeleteAsync`/`ResetPasswordAsync`).
+- `Interfaces/IDatabaseProvisioner.cs` + los 4 provisioners — se agregó
+  `Host`/`Port` (propiedades, derivadas de config, no del catálogo) y los
+  métodos `ChangePasswordAsync`/`DeactivateAsync` (implementados por motor:
+  `ALTER LOGIN ... DISABLE` en SQL Server, `ACCOUNT LOCK` en MySQL, `NOLOGIN`
+  en Postgres, vaciar `roles` en Mongo).
+- `Interfaces/IEmailService.cs` + `Services/SmtpEmailService.cs` (MailKit) +
+  `Services/EmailSettings.cs` + `Services/EmailTemplates.cs` — envío de
+  correo nuevo en el proyecto, hoy configurado para SMTP de Gmail/Workspace.
+- `Middleware/AppExceptions.cs` — nueva `NotFoundException` (404), usada para
+  "no existe o no es tuyo" con el mismo mensaje en ambos casos (evita
+  enumeración de IDs ajenos).
+- `Models/ProvisionedDatabaseDetail.cs`, `Data/ColmenaDbContext.cs` — nuevo
+  tipo sin clave para el resultado de `sp_GetDatabaseDetail` (incluye
+  `LoginName`, a diferencia de `ProvisionedDatabaseInfo` del listado).
+- [`sql/2026-07-22_database_lifecycle_sps.sql`](../sql/2026-07-22_database_lifecycle_sps.sql) —
+  4 SPs nuevos (no versionados en el repo por diseño, ver `CLAUDE.md`):
+  `sp_GetDatabaseDetail`, `sp_DeactivateDatabase`, `sp_DeleteDatabase`,
+  `sp_ResetDatabasePassword`.
+**Decisiones de diseño (confirmadas con el usuario):**
+- Desactivar = revocar acceso físico real (login/usuario deshabilitado en el
+  motor), no solo un flag en el catálogo — así una BD "Inactive" realmente no
+  es alcanzable aunque alguien tenga las credenciales viejas.
+- Eliminar = borrado físico real (`DROP DATABASE`/usuario, usa el `DropAsync`
+  que ya existía), irreversible, solo permitido si la BD ya está `Inactive`.
+- Reset de contraseña = la contraseña nueva SOLO se entrega por correo, nunca
+  en la respuesta HTTP (a diferencia de la creación, donde si se muestra una
+  vez en la respuesta) — decisión explícita para no repetir el patrón de
+  "credencial en el cuerpo de la respuesta" en un flujo que además implica
+  que el usuario ya perdió el control de la anterior.
+**Pendiente para que funcione en un ambiente real (2 pasos manuales, ninguno
+autoejecutable por el backend):**
+1. Correr [`sql/2026-07-22_database_lifecycle_sps.sql`](../sql/2026-07-22_database_lifecycle_sps.sql)
+   contra la base real. **Asume que `ProvisionedDatabases` ya tiene una
+   columna `LoginName`** (el script trae instrucciones si no existe).
+2. Configurar la sección `Email` de `appsettings.json` con una cuenta SMTP
+   real (hoy tiene placeholders) — para Gmail/Workspace se necesita una
+   **App Password** (requiere verificación en 2 pasos activada en la
+   cuenta), no la contraseña normal. Recomendado moverlo a User Secrets /
+   variables de entorno en vez de dejarlo en texto plano (mismo criterio que
+   el ítem 3 de este documento).
+3. Confirmar en vivo cada uno de los 4 endpoints contra la BD y un SMTP real.
+**Backlog relacionado, no implementado en esta revisión:** no existe
+"reactivar" una BD desactivada (`ENABLE`/`ACCOUNT UNLOCK`/`LOGIN` según el
+motor) — hoy desactivar es, en la práctica, un paso previo obligatorio hacia
+eliminar, no una pausa reversible desde la API.
+
+**Actualización 2026-07-22 (v2) — esquema real confirmado, script corregido:**
+al correr la v1 del script contra la base real, `sp_GetDatabaseDetail` falló
+con `SQL Error [207]: Invalid column name 'LoginName'`. El usuario compartió
+el diagrama ER real: `LoginName`/`PasswordHash` **no viven en
+`ProvisionedDatabases`**, sino en una tabla aparte, `DatabaseCredentials`
+(`DatabaseId`, `LoginName`, `PasswordHash`, `IsRevoked`, `CreatedAt`,
+`RevokedAt`) — relacionada 1-a-muchos con `ProvisionedDatabases`. Se corrigió
+[`sql/2026-07-22_database_lifecycle_sps.sql`](../sql/2026-07-22_database_lifecycle_sps.sql)
+(v2) para hacer `JOIN` contra `DatabaseCredentials` filtrando por
+`IsRevoked = 0` (la credencial vigente). De paso se aprovechó el diseño real
+de la tabla: `sp_ResetDatabasePassword` ahora **revoca la credencial vieja e
+inserta una fila nueva** (mismo `LoginName`, hash nuevo) en vez de
+sobreescribir — conserva historial completo de credenciales por BD, tal como
+sugieren las columnas `IsRevoked`/`RevokedAt`. `sp_DeleteDatabase` también
+revoca la credencial vigente al eliminar (higiene, ya no hay login físico
+correspondiente). **No se requirieron cambios en el código C#** — el join es
+un detalle interno del SP, la firma de parámetros no cambió.
+
+---
+
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
@@ -617,3 +699,4 @@ por motor), que ya eran correctas.
 | 8 | Doc desactualizada sobre callback OAuth | ⚪ Ya corregido en esta revisión | 🟢 Resuelto |
 | 17 | `redirect_uri` de OAuth en `http://` en vez de `https://` detrás del reverse proxy (QA) — rompía el login completo | 🔴 Alta | 🟡 Fix entregado, pendiente confirmar en QA |
 | 18 | Validación de entrada débil en Email/FullName/DbName/Engine — endurecida | 🟡 Media (defensa en profundidad) | 🟢 Resuelto |
+| 19 | Ciclo de vida manual de BD (detalle/desactivar/eliminar/reset password) — feature nueva | Feature | 🟡 Código completo, pendiente desplegar SPs + configurar SMTP |

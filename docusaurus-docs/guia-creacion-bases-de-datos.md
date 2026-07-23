@@ -5,6 +5,21 @@ aprovisionamiento de bases de datos de Colmena: cuándo se crea sola, cuándo
 hay que pedirla explícitamente, qué mandar, qué esperar de vuelta, y qué
 errores manejar.
 
+> 🆕 Esta guía cubre `POST /databases` y `GET /databases`. El ciclo de vida
+> posterior (ver los datos de conexión de nuevo, desactivar, eliminar, y
+> resetear la contraseña si se olvida) está en `docs/API.md` §6.3–6.6:
+>
+> - `GET /databases/{id}` — detalle de una BD (sin password).
+> - `POST /databases/{id}/deactivate` — revoca el acceso físico, requiere `Active`.
+> - `DELETE /databases/{id}` — borrado real, requiere `Inactive`.
+> - `POST /databases/{id}/reset-password` — genera una contraseña nueva y la
+>   envía por correo; **la respuesta HTTP no incluye la contraseña**, el
+>   frontend debe mostrar "revisa tu correo", no esperar un campo `password`.
+>
+> ⚠️ Estos 4 endpoints todavía no están desplegados en un ambiente real —
+> dependen de Stored Procedures nuevos y de configurar SMTP (ver
+> `docs/bugs.md` ítem 19).
+
 ---
 
 ## 1. Dos formas en que se crea una base de datos

@@ -103,3 +103,27 @@ public class DatabaseResponse
     public DateTime CreatedAt { get; set; }
     public DateTime? PausedAt { get; set; }
 }
+
+/// <summary>
+/// Detalle de una BD puntual (<c>GET /databases/{id}</c>) — pensado para
+/// cuando el usuario perdió sus credenciales de conexión y necesita volver a
+/// ver host/puerto/usuario. Deliberadamente NO incluye <c>password</c> (no se
+/// puede recuperar, solo se guarda el hash) — para eso existe
+/// <c>POST /databases/{id}/reset-password</c>.
+/// </summary>
+public class DatabaseDetailResponse
+{
+    public int DatabaseId { get; set; }
+    public string Engine { get; set; } = string.Empty;
+    public string DbName { get; set; } = string.Empty;
+    public string Status { get; set; } = "Active";
+    public string Host { get; set; } = string.Empty;
+    public int Port { get; set; }
+    public string LoginName { get; set; } = string.Empty;
+    public int MaxStorageMB { get; set; }
+    public decimal CurrentSizeMB { get; set; }
+    public DateTime LastActivityAt { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? PausedAt { get; set; }
+    public DateTime? DeletedAt { get; set; }
+}
