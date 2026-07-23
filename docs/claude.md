@@ -602,36 +602,80 @@ desplegados/confirmados) y esta bitácora.
 
 ---
 
+## Sesión 12 — 2026-07-23 (revisión de 4 hallazgos reportados por el equipo de frontend)
+
+**Pedido:** revisar 4 hallazgos que el front documentó tras integrar contra el
+backend real (local y desplegado) y corregir los que apliquen.
+
+**Resultado de la revisión (contra el código/config reales en disco):**
+
+1. **Connection string a `Database=master` (hallazgo "bloqueante" del front):**
+   verificado que el login funciona en vivo contra ese servidor desde la
+   sesión 3, o sea el esquema está en `master` y la app funciona. El 500 que
+   vio el front (07-17) es anterior a los arreglos de la sesión 2. **Decisión
+   del usuario: dejarlo como está**; documentado como deuda técnica en
+   `bugs.md` ítem 22 (nuevo, 🔵 conocido/aceptado). No se tocó `appsettings.json`.
+2. **Callback OAuth devolvía JSON crudo:** ya está resuelto en el código
+   committeado — `AuthController.ExternalCallback` redirige vía
+   `OAuthRedirectBuilder.BuildSuccess` a `{Frontend:BaseUrl}/oauth/callback?...`
+   (el diff local del front ya existe, más limpio). Pendiente solo de
+   despliegue: setear `Frontend:BaseUrl` al dominio real en el appsettings del
+   ambiente desplegado.
+3. **400 con correo de 150 caracteres:** ya resuelto (ítem 20, validación
+   centralizada e inclusiva `<= 150`). Se agregó nota de reconfirmación en
+   `bugs.md`: si QA aún lo ve es contra el desplegado (va detrás), redesplegar.
+4. **GitHub reingresa sin pedir credenciales tras logout:** comportamiento
+   esperado de SSO, no un bug. Documentado en `bugs.md` ítem 23 (nuevo, 🟢 no
+   es bug). GitHub OAuth no soporta `prompt=login`, no hay fix limpio de
+   backend.
+
+**Qué se hizo:** solo documentación (`bugs.md` ítems 22 y 23 nuevos + nota de
+reconfirmación en el 20 + tabla resumen; esta bitácora). Ningún cambio de
+código: de los 4 hallazgos, 2 ya estaban resueltos en el código, 1 es decisión
+de config del usuario (dejar master) y 1 es comportamiento esperado.
+
+**Pendiente clave que surge de esta revisión:** **redesplegar el backend
+actual a QA**, porque varios fixes ya committeados (validación de email 150,
+callback OAuth por redirect, rate limit OAuth de la sesión 11) no llegan a QA
+hasta que se despliegue, y setear `Frontend:BaseUrl` al dominio real ahí.
+
+---
+
 ## Backlog / próximos pasos
 
-1. **Confirmar la compilación tras los fixes de la sesión 11**: correr
-   `dotnet build` en la máquina del usuario para validar los ítems 2/5/7 (se
-   aplicaron sin poder compilar en el entorno de la sesión) y, para el ítem 4,
-   `dotnet restore` + `dotnet list package --vulnerable` para confirmar que el
-   aviso `NU1903` de `Microsoft.OpenApi` desaparece con el pin a 2.7.5 (mover
-   el ítem 4 de 🟡 a 🟢).
-2. **Confirmar en vivo el fix de `sp_UpsertExternalLogin`** (ítem 9) tras
-   aplicar el `ALTER PROCEDURE` en la BD real — probar un login OAuth completo
-   de punta a punta.
-3. **Evaluar bajar el `MaxLength` de `CreateDatabaseRequest.DbName`** (hoy
-   128) para dejar margen bajo el límite de identificador de 64 caracteres de
-   MySQL una vez concatenado el prefijo por usuario.
-4. **Ciclo de vida automático (TTL)**: implementar `sp_GetIdleDatabases` +
-   `DatabaseLifecycleJob` (`IHostedService`) que detecte inactividad y
-   reutilice `sp_DeactivateDatabase`/`sp_DeleteDatabase` (ya desplegados) en
-   vez de crear SPs nuevas — ítem 11 de `bugs.md`.
-5. **Endpoint de "reactivar" una BD desactivada** (`ENABLE`/`ACCOUNT UNLOCK`/
-   `LOGIN` según el motor) — hoy desactivar es unidireccional hacia eliminar.
-6. **Cuota de almacenamiento real** para Postgres/MySQL/Mongo — ítem 10 de
-   `bugs.md`.
-7. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
-   ítem 12 de `bugs.md`.
-8. **Token JWT (y PII) en query string del redirect OAuth** — ítems 1 y 15 de
-   `bugs.md` (mismo fix: intercambio por código de un solo uso).
-9. **Secretos reales en texto plano en `appsettings.json`** (incluye las
-   credenciales SMTP de la sección `Email`) — ítem 3 de `bugs.md`.
+1. **Redesplegar el backend actual a QA** para que lleguen los fixes ya
+   committeados que el front todavía ve fallar contra el desplegado
+   (validación de email de 150 caracteres — ítem 20; callback OAuth por
+   redirect; rate limit OAuth — ítem 2) y **setear `Frontend:BaseUrl` al
+   dominio real** (`https://idempotencia.andrescortes.dev`) en el appsettings
+   del ambiente desplegado, no `localhost`.
+2. **Confirmar la compilación tras los fixes de la sesión 11**: `dotnet build`
+   (ítems 2/5/7) y, para el ítem 4, `dotnet restore` +
+   `dotnet list package --vulnerable` para confirmar que `NU1903` desaparece
+   con el pin de `Microsoft.OpenApi` 2.7.5 (mover el ítem 4 de 🟡 a 🟢).
+3. **Migrar el connection string fuera de `master`** (deuda técnica, `bugs.md`
+   ítem 22): cuando exista una BD dedicada con el esquema (tablas + SPs)
+   desplegado, apuntar ahí `ConnectionStrings:Colmena` y el
+   `Provisioning:SqlServer:AdminConnectionString`. Hoy funciona en master, no
+   es urgente.
+4. **Confirmar en vivo el fix de `sp_UpsertExternalLogin`** (ítem 9) tras
+   aplicar el `ALTER PROCEDURE` en la BD real — login OAuth de punta a punta.
+5. **Evaluar bajar el `MaxLength` de `CreateDatabaseRequest.DbName`** (hoy
+   128) para dejar margen bajo el límite de 64 caracteres de MySQL.
+6. **Ciclo de vida automático (TTL)**: `sp_GetIdleDatabases` +
+   `DatabaseLifecycleJob` (`IHostedService`) reutilizando
+   `sp_DeactivateDatabase`/`sp_DeleteDatabase` — ítem 11 de `bugs.md`.
+7. **Endpoint de "reactivar" una BD desactivada** — hoy desactivar es
+   unidireccional hacia eliminar.
+8. **Cuota de almacenamiento real** para Postgres/MySQL/Mongo — ítem 10.
+9. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
+   ítem 12.
+10. **Token JWT (y PII) en query string del redirect OAuth** — ítems 1 y 15
+    (mismo fix: intercambio por código de un solo uso).
+11. **Secretos reales en texto plano en `appsettings.json`** (incluye SMTP y,
+    ahora explícito, las credenciales del `sa`) — ítem 3.
 
-**Resueltos en la sesión 11 (salen del backlog):** desplegar los SPs del ciclo
-de vida y confirmar sus 4 endpoints (ítem 19), confirmar el fix del ítem 17,
-rate limit OAuth (ítem 2), `CurrentSizeMB` sin tipo (ítem 5), claim `UserId`
-duplicado (ítem 7), `idempotencia.http` obsoleto (ítem 6).
+**Resueltos/cerrados en la sesión 12 (revisión del front):** callback OAuth por
+redirect y validación de email 150 ya estaban en el código (falta redeploy a
+QA); connection string a master aceptado como deuda técnica (ítem 22); GitHub
+SSO documentado como comportamiento esperado (ítem 23).

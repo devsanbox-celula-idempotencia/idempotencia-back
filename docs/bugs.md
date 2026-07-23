@@ -774,6 +774,13 @@ entrada (no una regla de negocio) pertenece al DTO — es lo que ya hacían
 `CreateDatabaseRequest`/`FullName` (ítem 18) y mantiene el mismo patrón; así
 sigue disparando un `400` de `ValidationProblemDetails` estándar en vez de
 tener que envolver esto en una excepción de negocio desde `AuthService`.
+**Reconfirmado 2026-07-23:** el equipo de front volvió a reportar el 400 con un
+correo de 150 caracteres. Verificado que el código actual ya lo permite
+(`InputNormalization.IsWithinMaxEmailLength` usa `<= 150`, inclusivo). Si QA
+sigue viéndolo, es contra el ambiente **desplegado**, que va detrás del código
+committeado — se resuelve redesplegando. Si aun así fallara con el código
+nuevo, revisar del lado de la BD que `@Email` de `sp_RegisterUser` y la columna
+`Users.Email` sean `NVARCHAR(150)` y no menos.
 
 ---
 
@@ -806,6 +813,57 @@ errores de `/auth/register`), y ambas guías de Docusaurus
 
 ---
 
+### 22. Connection string `Colmena` apunta a `Database=master` (funciona, pero mala práctica) — reportado por el front
+**Estado:** 🔵 Conocido / aceptado (2026-07-23): funciona en vivo; el equipo
+decidió dejarlo como está por ahora.
+**Tipo:** Configuración / buena práctica (no rompe funcionalidad hoy).
+**Dónde:** [`appsettings.json`](../appsettings.json) →
+`ConnectionStrings:Colmena` (y `Provisioning:SqlServer:AdminConnectionString`).
+**Reporte del front (2026-07-17):** con `Database=master`,
+`POST /auth/register`/`login` devolvían 500, con la hipótesis de que los SPs
+no existen en `master`.
+**Verificación (2026-07-23):** el login se confirmó funcionando **en vivo**
+contra ese mismo servidor (`100.99.206.50`) desde la sesión 3 (ver ítem 9), y
+siguió funcionando en las sesiones posteriores. Es decir, el esquema (tablas +
+SPs) **sí está desplegado en `master`** y la app funciona tal cual. El 500 que
+vio el front el 07-17 es anterior a los arreglos de connection string de la
+sesión 2 (había un typo `Server=d`) — ya no reproduce. Nota: en SQL Server los
+procedimientos con prefijo `sp_` creados en `master` se resuelven desde
+cualquier contexto de BD, lo que refuerza que "apuntar a master" hoy no rompe
+nada aunque sea poco ortodoxo.
+**Decisión (2026-07-23):** el usuario optó por **dejarlo como está**. Cambiar
+el `Database` sin migrar primero el esquema completo a la BD destino rompería
+todo lo que hoy funciona. Queda como deuda técnica: cuando exista una BD
+dedicada con el esquema desplegado, apuntar ahí `ConnectionStrings:Colmena` (y
+el `AdminConnectionString` de SqlServer).
+
+---
+
+### 23. Login por GitHub reingresa sin pedir credenciales tras logout — comportamiento esperado de SSO
+**Estado:** 🟢 No es un bug (resultado esperado de OAuth/SSO) — documentado
+2026-07-23.
+**Tipo:** Comportamiento de OAuth/SSO (no es defecto de implementación).
+**Dónde:** flujo OAuth de GitHub ([`Program.cs`](../Program.cs), `.AddGitHub(...)`),
+reportado por QA.
+**Reporte de QA:** GitHub login → logout en la app → "Iniciar sesión con
+GitHub" reingresa directo, sin pantalla de autorización.
+**Causa:** GitHub mantiene su propia cookie de sesión en `github.com`,
+independiente de la sesión de la app. Si el usuario sigue logueado en GitHub,
+el proveedor aprueba la autorización sin volver a pedir credenciales — así
+funciona el SSO de cualquier app de terceros. El logout de la app (que sí
+limpia el token/estado local, confirmado por el front) no puede ni debe cerrar
+la sesión del usuario en github.com.
+**Mitigantes posibles (si producto lo pide):** GitHub OAuth **no** ofrece
+`prompt=login`/`max_age` (a diferencia de OIDC/Google), así que no hay forma
+limpia de forzar reautenticación desde el backend. El parámetro `login=<usuario>`
+solo fuerza el selector de cuenta si el usuario tiene varias cuentas de GitHub.
+Forzar logout en github.com afectaría al usuario fuera del producto (no
+recomendado).
+**Decisión:** se comunica a QA como resultado esperado; no se aplica cambio de
+código.
+
+---
+
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
@@ -835,3 +893,5 @@ errores de `/auth/register`), y ambas guías de Docusaurus
 | 19 | Ciclo de vida manual de BD (detalle/desactivar/eliminar/reset password) — feature nueva | Feature | 🟢 Resuelto (SPs desplegados + SMTP + confirmado en vivo) |
 | 20 | `POST /auth/register` rechazaba un correo de 150 caracteres (máximo documentado) por validadores apilados | 🟡 Media (falso negativo, bloqueaba registros válidos) | 🟢 Resuelto |
 | 21 | `POST /auth/register` aceptaba contraseñas de más de 12 caracteres (límite real de negocio) | 🟡 Media (falso positivo, dato inválido aceptado) | 🟢 Resuelto |
+| 22 | Connection string apunta a `Database=master` (funciona; mala práctica) — reportado por el front | 🟡 Config | 🔵 Conocido/aceptado (dejar como está) |
+| 23 | GitHub reingresa sin pedir credenciales tras logout | ⚪ N/A | 🟢 No es bug (SSO esperado) |
