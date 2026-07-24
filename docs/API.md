@@ -149,7 +149,7 @@ Anónimo · rate limit `auth` (10/min/IP)
 ```json
 {
   "email": "ana@uni.edu",
-  "password": "MiClaveSegura123",
+  "password": "Segura123",
   "fullName": "Ana Pérez"
 }
 ```
@@ -159,7 +159,7 @@ Anónimo · rate limit `auth` (10/min/IP)
   espacios), máx. 150 caracteres. Se normaliza automáticamente a minúsculas
   y sin espacios al inicio/final antes de validarse y guardarse — un mismo
   correo con mayúsculas distintas no crea cuentas duplicadas.
-- `password`: requerido, mín. 8 y máx. 100 caracteres. No se recorta ni se
+- `password`: requerido, mín. 8 y **máx. 12 caracteres**. No se recorta ni se
   normaliza (los espacios, si los escribiste, son parte de la contraseña).
 - `fullName`: requerido, máx. 150 caracteres. Solo letras (con acentos/ñ),
   espacios, apóstrofes, guiones y puntos — sin dígitos ni símbolos. Los
@@ -189,7 +189,7 @@ Anónimo · rate limit `auth` (10/min/IP)
 ```json
 {
   "email": "ana@uni.edu",
-  "password": "MiClaveSegura123"
+  "password": "Segura123"
 }
 ```
 
@@ -217,6 +217,12 @@ navegador** a los endpoints de inicio:
 |-----------|---------------------------|
 | Google | `https://localhost:7113/auth/google/login` |
 | GitHub | `https://localhost:7113/auth/github/login` |
+
+> **Rate limit:** los 4 endpoints OAuth (login y callback de Google/GitHub)
+> usan la política `oauth` (**20 peticiones/min por IP**), agregada el
+> 2026-07-23 (`bugs.md` ítem 2). Un login completo consume 2 (el `/login` que
+> redirige y el `/callback` que vuelve), así que 20/min deja margen para
+> reintentos legítimos; al superarlo se responde `429` como el resto de la API.
 
 **Flujo completo:**
 
@@ -703,14 +709,14 @@ async function getMyDatabases() {
 |----------|--------|
 | `POST /auth/register` | ⚠️ Código completo; depende de `sp_RegisterUser` (confirmado en vivo funcionando, sin el bug de `Roles` — `bugs.md` ítem 9) |
 | `POST /auth/login` | ✅ Confirmado en vivo funcionando. Enumeración de cuentas OAuth-only corregida (`bugs.md` ítem 14). |
-| Google / GitHub OAuth | ⚠️ Funcional, pero expone PII + token en query string (`bugs.md` ítems 1 y 15, abiertos) — el front debe limpiar la URL (sección 5.3). Ya NO auto-aprovisiona MySQL (`bugs.md` ítem 16, corregido) — el front debe pedirlo (sección 5.4). |
+| Google / GitHub OAuth | ⚠️ Funcional (rate limit `oauth` 20/min/IP agregado — `bugs.md` ítem 2). El `redirect_uri_mismatch` de QA quedó resuelto y confirmado (`bugs.md` ítem 17). Todavía expone PII + token en query string (`bugs.md` ítems 1 y 15, abiertos) — el front debe limpiar la URL (sección 5.3). Ya NO auto-aprovisiona MySQL (`bugs.md` ítem 16) — el front debe pedirlo (sección 5.4). |
 | `POST /databases` (los 4 motores) | ⚠️ Los 4 provisioners están implementados; depende de `sp_ReserveDatabase`/`sp_ConfirmDatabase`/`sp_FailDatabase`. Rate limit dedicado (5/min/usuario) y `maxConcurrentConnections` configurable agregados. |
 | Auto-aprovisionamiento MySQL en primer login/registro por contraseña | ✅ Implementado. NO aplica a OAuth (ver arriba). |
 | `GET /databases` | ⚠️ Código completo; depende de `sp_GetUserDatabases`. No confirmado si `currentSizeMB` refleja tamaño real (`bugs.md` ítem 10). |
-| `GET /databases/{id}` (detalle) | 🆕 Código completo; depende de `sp_GetDatabaseDetail`, **nuevo, todavía sin desplegar** en la BD real (ver `sql/2026-07-22_database_lifecycle_sps.sql`). |
-| `POST /databases/{id}/deactivate` | 🆕 Código completo; depende de `sp_DeactivateDatabase`, sin desplegar. Revoca acceso físico sin borrar datos. |
-| `DELETE /databases/{id}` | 🆕 Código completo; depende de `sp_DeleteDatabase`, sin desplegar. Borrado físico real, solo si la BD está `Inactive`. |
-| `POST /databases/{id}/reset-password` | 🆕 Código completo; depende de `sp_ResetDatabasePassword`, sin desplegar, **y de la sección `Email` (SMTP) en `appsettings.json`, hoy con placeholders sin credenciales reales** — no funcionará hasta configurarla. |
+| `GET /databases/{id}` (detalle) | ✅ Desplegado y confirmado en vivo (2026-07-23) — `sp_GetDatabaseDetail` ya está en la BD real (`bugs.md` ítem 19, 🟢). |
+| `POST /databases/{id}/deactivate` | ✅ Desplegado y confirmado (2026-07-23) — `sp_DeactivateDatabase` en la BD real. Revoca acceso físico sin borrar datos. |
+| `DELETE /databases/{id}` | ✅ Desplegado y confirmado (2026-07-23) — `sp_DeleteDatabase` en la BD real. Borrado físico real, solo si la BD está `Inactive`. |
+| `POST /databases/{id}/reset-password` | ✅ Desplegado y confirmado (2026-07-23) — `sp_ResetDatabasePassword` en la BD real y SMTP configurado; la contraseña nueva llega por correo. |
 | `GET /statistics` (solo Admin) | ⚠️ Código completo; depende de `sp_GetPlatformStatistics`, no verificado en vivo todavía. |
 
 **Aislamiento entre usuarios en el motor físico** (relevante si el frontend

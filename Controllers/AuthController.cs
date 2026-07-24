@@ -47,20 +47,24 @@ public class AuthController : ControllerBase
 
     [HttpGet("google/login")]
     [AllowAnonymous]
+    [EnableRateLimiting("oauth")]
     public IActionResult GoogleLogin() => Challenge(
         new AuthenticationProperties { RedirectUri = Url.Action(nameof(GoogleCallback)) }, "Google");
 
     [HttpGet("google/callback")]
     [AllowAnonymous]
+    [EnableRateLimiting("oauth")]
     public Task<IActionResult> GoogleCallback(CancellationToken ct) => ExternalCallback("Google", ct);
 
     [HttpGet("github/login")]
     [AllowAnonymous]
+    [EnableRateLimiting("oauth")]
     public IActionResult GitHubLogin() => Challenge(
         new AuthenticationProperties { RedirectUri = Url.Action(nameof(GitHubCallback)) }, "GitHub");
 
     [HttpGet("github/callback")]
     [AllowAnonymous]
+    [EnableRateLimiting("oauth")]
     public Task<IActionResult> GitHubCallback(CancellationToken ct) => ExternalCallback("GitHub", ct);
 
     // Resuelve la identidad externa y redirige al frontend con la sesión o el error.

@@ -155,11 +155,14 @@ builder.Services.AddCors(options =>
 // ---------------------------------------------------------------------------
 // Rate limiting (nativo de .NET). Protege contra abuso/fuerza bruta.
 //   - Política "auth": estricta, para login/registro (por IP).
+//   - Política "oauth": intermedia, para los flujos de redirect OAuth (por IP).
+//   - Política "db-provisioning": para crear/operar BDs físicas (por UserId).
 //   - GlobalLimiter: límite general de seguridad por IP para toda la API.
 // La partición usa la IP remota; detrás de un proxy inverso (despliegue),
 // ForwardedHeaders (configurado arriba) ya resuelve la IP real del cliente.
 // ---------------------------------------------------------------------------
 const string AuthRateLimitPolicy = "auth";
+const string OAuthRateLimitPolicy = "oauth";
 const string DbProvisioningRateLimitPolicy = "db-provisioning";
 builder.Services.AddRateLimiter(options =>
 {
@@ -176,6 +179,23 @@ builder.Services.AddRateLimiter(options =>
                 QueueLimit = 0 // sin cola: al superar el límite, se rechaza de una
             }));
 
+    // Política intermedia para los 4 endpoints OAuth (login + callback de
+    // Google/GitHub): antes solo los cubría el límite global (100/min/IP), 10
+    // veces más laxo que el resto de la autenticación. No validan credenciales
+    // directamente, pero conviene acotar el abuso del flujo de redirect. 20/min
+    // por IP deja margen para reintentos legítimos (un login completo = 2
+    // requests: /login redirige y /callback vuelve) sin ser tan estricto como
+    // "auth" (10/min), que además comparte partición con login/registro.
+    options.AddPolicy(OAuthRateLimitPolicy, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 20,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+
     // Política para POST /databases: crear BDs físicas es costoso (conecta al
     // motor real, ejecuta DDL). Se particiona por UserId (claim del JWT) en vez
     // de IP, porque el endpoint ya requiere autenticación y el abuso relevante
@@ -183,7 +203,7 @@ builder.Services.AddRateLimiter(options =>
     // generoso para uso normal (el login ya crea la primera automáticamente).
     options.AddPolicy(DbProvisioningRateLimitPolicy, httpContext =>
         RateLimitPartition.GetFixedWindowLimiter(
-            partitionKey: httpContext.User.FindFirst("UserId")?.Value
+            partitionKey: httpContext.User.FindFirst(JwtClaimNames.UserId)?.Value
                 ?? httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
             factory: _ => new FixedWindowRateLimiterOptions
             {

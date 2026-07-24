@@ -46,6 +46,10 @@ public class ColmenaDbContext : DbContext
         {
             e.HasNoKey();
             e.ToView(null);
+            // Tipo explícito del decimal: sin esto EF Core avisa que puede
+            // truncar en silencio los valores de CurrentSizeMB que devuelve
+            // sp_GetUserDatabases si exceden la precisión/escala por defecto.
+            e.Property(p => p.CurrentSizeMB).HasColumnType("decimal(10,2)");
         });
 
         modelBuilder.Entity<DatabaseReservation>(e =>
@@ -58,6 +62,9 @@ public class ColmenaDbContext : DbContext
         {
             e.HasNoKey();
             e.ToView(null);
+            // Mismo motivo que ProvisionedDatabaseInfo: sp_GetDatabaseDetail
+            // también devuelve CurrentSizeMB como decimal.
+            e.Property(p => p.CurrentSizeMB).HasColumnType("decimal(10,2)");
         });
 
         modelBuilder.Entity<PlatformStatistics>(e =>

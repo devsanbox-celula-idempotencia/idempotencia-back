@@ -96,7 +96,7 @@ header `WWW-Authenticate` y **cuerpo vacío** (no usa el formato `{status,error}
 ### `POST /auth/register`
 | Código | Causa | Detalle |
 |--------|-------|---------|
-| `400` | Validación | `email` inválido/>150, `password` <8 o >100, `fullName` vacío/>150 |
+| `400` | Validación | `email` inválido/>150, `password` <8 o >12, `fullName` vacío/>150 |
 | `400` | Negocio (SP) | `sp_RegisterUser` lanza `THROW 50001` → *"El correo ya está registrado."* |
 | `500` | `InvalidOperationException` | El SP no devolvió la fila de identidad esperada |
 | `500` | `SqlException` | El SP no existe, o falla la conexión a la DB |

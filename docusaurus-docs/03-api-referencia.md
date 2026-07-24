@@ -28,13 +28,13 @@ Anónimo · rate limit `auth` (10/min/IP)
 
 **Body:**
 ```json
-{ "email": "ana@uni.edu", "password": "MiClaveSegura123", "fullName": "Ana Pérez" }
+{ "email": "ana@uni.edu", "password": "Segura123", "fullName": "Ana Pérez" }
 ```
 
 | Campo | Validación |
 |---|---|
 | `email` | Requerido, formato email, máx. 150 caracteres |
-| `password` | Requerido, 8–100 caracteres |
+| `password` | Requerido, 8–12 caracteres |
 | `fullName` | Requerido, máx. 150 caracteres |
 
 **200 OK** → `AuthResponse` (ver abajo), con `mySqlDatabase` siempre poblado
@@ -45,7 +45,7 @@ Anónimo · rate limit `auth` (10/min/IP)
 
 **Body:**
 ```json
-{ "email": "ana@uni.edu", "password": "MiClaveSegura123" }
+{ "email": "ana@uni.edu", "password": "Segura123" }
 ```
 
 **200 OK** → `AuthResponse`. `mySqlDatabase` viene poblado solo la primera vez
