@@ -57,6 +57,21 @@ public interface IDatabaseProvisioner
     Task DeactivateAsync(string dbName, string login, CancellationToken ct = default);
 
     /// <summary>
+    /// Restaura la capacidad de conexión revocada por
+    /// <see cref="DeactivateAsync"/>. Es la operación inversa exacta: cada
+    /// motor deshace lo que hizo al desactivar (habilitar el login,
+    /// desbloquear la cuenta, devolver el LOGIN al rol, restituir los roles del
+    /// usuario). Usado por <c>POST /databases/{id}/reactivate</c>.
+    ///
+    /// Los datos nunca se tocaron al desactivar, así que reactivar devuelve la
+    /// BD exactamente como estaba, con la misma contraseña. Es idempotente:
+    /// aplicarlo sobre una BD que ya está habilitada es un no-op exitoso en los
+    /// cuatro motores, lo que permite reintentar sin riesgo. Ver nota de
+    /// <paramref name="dbName"/> en <see cref="ChangePasswordAsync"/>.
+    /// </summary>
+    Task ReactivateAsync(string dbName, string login, CancellationToken ct = default);
+
+    /// <summary>
     /// Mide el tamaño real que ocupa la BD en el motor, en MB. Es la única
     /// fuente de verdad posible para <c>CurrentSizeMB</c>: el catálogo vive en
     /// SQL Server y no puede medir bases de MySQL/PostgreSQL/Mongo, así que la

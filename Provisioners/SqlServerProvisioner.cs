@@ -117,6 +117,19 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"ALTER LOGIN {lg} DISABLE;", ct);
     }
 
+    public async Task ReactivateAsync(string dbName, string login, CancellationToken ct = default)
+    {
+        var lg = QuoteIdentifier(login);
+
+        await using var conn = new SqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        // Inverso exacto del DISABLE de DeactivateAsync. El login nunca se
+        // borró ni perdió sus permisos dentro de la BD, así que ENABLE basta
+        // para dejarlo como estaba, con la misma contraseña.
+        await ExecAsync(conn, $"ALTER LOGIN {lg} ENABLE;", ct);
+    }
+
     public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)
     {
         await using var conn = new SqlConnection(_adminConnectionString);

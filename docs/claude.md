@@ -750,6 +750,21 @@ indicador de almacenamiento usado servía y, al confirmar que no, arreglarlo.
 en el ítem 25 de `bugs.md` en vez de agregarse a un archivo. No hace falta
 tocarla para que el job corra: todos los valores tienen default.
 
+4. **Ítem 26 (nuevo) — endpoint de reactivar, cierra el punto 7 del backlog.**
+   Desactivar era un camino sin retorno aunque los datos nunca se borran: desde
+   `Inactive` la única salida era `DELETE`. Se agregó
+   `POST /databases/{id}/reactivate`, la inversa exacta: `ReactivateAsync` en
+   [`Interfaces/IDatabaseProvisioner.cs`](../Interfaces/IDatabaseProvisioner.cs)
+   y los cuatro provisioners (`ENABLE`, `ACCOUNT UNLOCK`, `LOGIN`, y en Mongo
+   restituir `readWrite` sobre la propia BD),
+   `sp_ReactivateDatabase` en
+   [`sql/2026-07-29-reactivate.sql`](../sql/2026-07-29-reactivate.sql), y el
+   endpoint en [`Controllers/DatabasesController.cs`](../Controllers/DatabasesController.cs).
+   El orden motor-primero se eligió por la razón contraria a la de desactivar:
+   deja el estado desincronizado *recuperable* (BD habilitada pero marcada
+   `Inactive`, con el botón todavía visible) en vez del que dejaría al usuario
+   atascado. Detalle completo en el ítem 26.
+
 ---
 
 ## Backlog / próximos pasos
@@ -780,18 +795,20 @@ tocarla para que el job corra: todos los valores tienen default.
 6. **Ciclo de vida automático (TTL)**: `sp_GetIdleDatabases` +
    `DatabaseLifecycleJob` (`IHostedService`) reutilizando
    `sp_DeactivateDatabase`/`sp_DeleteDatabase` — ítem 11 de `bugs.md`.
-7. **Endpoint de "reactivar" una BD desactivada** — hoy desactivar es
-   unidireccional hacia eliminar.
+7. ~~**Endpoint de "reactivar" una BD desactivada**~~ — **resuelto en la
+   sesión 14** (`POST /databases/{id}/reactivate`, ítem 26). Falta ejecutar
+   `sql/2026-07-29-reactivate.sql` y desplegar.
 8. **Aplicar la cuota de almacenamiento** en Postgres/MySQL/Mongo — ítem 10.
    La MEDICIÓN ya está resuelta por el `DatabaseSizeMonitor` de la sesión 14
    (ítem 25); lo que falta es actuar sobre ella: revocar escrituras al superar
    `MaxStorageMB` y restaurarlas al volver a estar por debajo. Implica un
    estado nuevo (`'OverQuota'`) en `CK_ProvDb_Status` y su SP.
-9. **Ejecutar en la BD de QA los dos scripts pendientes de la sesión 14:** el
-   `ALTER TABLE` de `CK_ProvDb_Status` (ítem 24, desbloquea desactivar) y
+9. **Ejecutar en la BD de QA los tres scripts pendientes de la sesión 14, en
+   este orden:** `sql/2026-07-29-fix-ck-provdb-status.sql` (ítem 24, desbloquea
+   desactivar — va primero), `sql/2026-07-29-reactivate.sql` (ítem 26) y
    `sql/2026-07-29-size-sync.sql` (ítem 25, sin él el job no tiene SPs que
-   llamar). Verificar de paso que `sp_DeleteDatabase` no tenga su guarda
-   escrita contra `'Paused'`.
+   llamar). El primero incluye un paso que verifica si algún otro SP tiene su
+   guarda escrita contra `'Paused'`.
 10. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
     ítem 12.
 11. **Token JWT (y PII) en query string del redirect OAuth** — ítems 1 y 15

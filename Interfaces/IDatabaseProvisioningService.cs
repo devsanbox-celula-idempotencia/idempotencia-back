@@ -33,6 +33,14 @@ public interface IDatabaseProvisioningService
     Task<DatabaseDetailResponse> DeactivateAsync(int userId, int databaseId, CancellationToken ct = default);
 
     /// <summary>
+    /// Restaura el acceso físico revocado por <see cref="DeactivateAsync"/> y
+    /// devuelve la BD a 'Active'. Requiere que esté 'Inactive'. Los datos nunca
+    /// se tocaron al desactivar, así que la BD vuelve tal cual estaba y con la
+    /// misma contraseña. Reintentable sin riesgo.
+    /// </summary>
+    Task<DatabaseDetailResponse> ReactivateAsync(int userId, int databaseId, CancellationToken ct = default);
+
+    /// <summary>
     /// Elimina físicamente la BD + usuario (irreversible) y la marca 'Deleted'
     /// en el catálogo. Requiere que esté 'Inactive' — de lo contrario lanza
     /// <see cref="idempotencia.Middleware.AppException"/> (400).

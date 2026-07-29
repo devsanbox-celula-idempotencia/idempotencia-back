@@ -62,7 +62,7 @@ que el frontend sepa qué es seguro loguear/persistir y qué no:
 | PII en el redirect OAuth | `email`, `fullName`, `role`, `userId`, `token` en la query string | **Hallazgo abierto** — ver `docs/bugs.md` ítems 1 y 15. El navegador guarda esto en su historial y puede quedar en logs de acceso del servidor/proxy. Limpia la URL (`history.replaceState`) apenas la leas (ver sección 4.3). |
 | Stack traces / detalles internos de excepciones | — | Nunca se exponen. Todo error no controlado devuelve un mensaje genérico (`"Ocurrió un error inesperado."` o `"Ocurrió un error al procesar la solicitud."`); el detalle real solo queda en los logs del servidor. |
 | `PasswordHash` de usuarios | — | Nunca se serializa en ninguna respuesta; se usa solo internamente para verificar con BCrypt. |
-| Contraseña nueva de `POST /databases/{id}/reset-password` | Correo electrónico del usuario (SMTP) | **Alta sensibilidad** — a propósito NO viaja en la respuesta HTTP (ver sección 6.6), solo por correo, para no dejarla en historial de red/logs de acceso. El frontend no debe esperar un campo `password` en esta respuesta. |
+| Contraseña nueva de `POST /databases/{id}/reset-password` | Correo electrónico del usuario (SMTP) | **Alta sensibilidad** — a propósito NO viaja en la respuesta HTTP (ver sección 6.7), solo por correo, para no dejarla en historial de red/logs de acceso. El frontend no debe esperar un campo `password` en esta respuesta. |
 | `loginName` en `GET /databases/{id}` | `DatabaseDetailResponse` | Bajo riesgo — es tu propio usuario de conexión, no una contraseña. Se reexpone a propósito para el caso de "perdí mis datos de conexión". |
 
 ---
@@ -296,7 +296,7 @@ Detalles a tener en cuenta:
   OAuth — solo en el correo. Es un secreto de un solo uso.
 - El envío es best-effort: si el correo llegara a fallar, el login igual
   funciona y la BD queda creada; el usuario puede regenerar la contraseña con
-  `POST /databases/{id}/reset-password` (sección 6.6), que también la manda por
+  `POST /databases/{id}/reset-password` (sección 6.7), que también la manda por
   correo.
 - `POST /databases` sigue disponible para crear BDs adicionales o de otros
   motores (sección 6.1).
@@ -474,9 +474,12 @@ JWT Bearer · rate limit `db-provisioning` (5/min/usuario)
 
 Revoca el acceso físico (deshabilita el login/usuario en el motor) **sin
 borrar los datos**. Requiere que la BD esté `Active`. Es el paso obligatorio
-antes de poder eliminarla (sección 6.5) — hoy no hay un endpoint para
-reactivarla, trátalo como una confirmación intermedia antes del borrado
-definitivo, no como una acción trivialmente reversible desde la API.
+antes de poder eliminarla (sección 6.6).
+
+**Ya es reversible** (desde 2026-07-29): la BD desactivada se puede volver a
+activar con `POST /databases/{id}/reactivate` (sección 6.5). Presenta
+desactivar como una pausa, no como un punto de no retorno — lo irreversible es
+el `DELETE`.
 
 **Respuesta `200 OK`:** el mismo shape que la sección 6.3, con
 `"status": "Inactive"` y `pausedAt` poblado.
@@ -491,7 +494,43 @@ definitivo, no como una acción trivialmente reversible desde la API.
 
 ---
 
-### 6.5 Eliminar una base de datos
+### 6.5 Reactivar una base de datos
+
+```
+POST /databases/{id}/reactivate
+```
+JWT Bearer · rate limit `db-provisioning` (5/min/usuario)
+
+Deshace la desactivación: restaura el acceso del login/usuario en el motor y
+devuelve la BD a `Active`. Requiere que esté `Inactive`.
+
+Lo importante para la UI: **los datos y la contraseña siguen siendo los
+mismos**. Desactivar nunca borró nada, solo revocó la conexión, así que después
+de reactivar el estudiante se conecta con exactamente las mismas credenciales
+que ya tenía. No le ofrezcas resetear la contraseña como parte de este flujo.
+
+Es **reintentable sin riesgo**: si la llamada falla a mitad de camino, volver a
+pulsar el botón completa la operación (los cuatro motores tratan la
+reactivación como idempotente).
+
+**Respuesta `200 OK`:** el mismo shape que la sección 6.3, con
+`"status": "Active"` y `pausedAt` en `null`.
+
+**Errores/excepciones posibles:**
+| Código | Cuándo | Mensaje |
+|---|---|---|
+| `401` | Falta el token, es inválido o expiró | — |
+| `404` | El `id` no existe o no es del usuario | `"Base de datos no encontrada."` |
+| `400` | La BD no está `Inactive` (sigue activa, o ya fue eliminada) | `"Solo se puede reactivar una base de datos que esté inactiva."` |
+| `429` | Más de 5 solicitudes/min de este usuario (comparte el límite con `POST /databases`) | `"Demasiadas solicitudes. Inténtalo más tarde."` |
+
+> Qué botón mostrar según `status`: con `"Active"` van "Desactivar" y
+> "Eliminar" deshabilitado; con `"Inactive"` van **"Reactivar"** y "Eliminar"
+> habilitado; con `"Deleted"` no va ninguno.
+
+---
+
+### 6.6 Eliminar una base de datos
 
 ```
 DELETE /databases/{id}
@@ -513,7 +552,7 @@ irreversible. Solo permitido si la BD ya está `Inactive` (sección 6.4).
 
 ---
 
-### 6.6 Restablecer la contraseña de una base de datos
+### 6.7 Restablecer la contraseña de una base de datos
 
 ```
 POST /databases/{id}/reset-password

@@ -144,6 +144,44 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         return MapToDetailResponse(detail, provisioner);
     }
 
+    public async Task<DatabaseDetailResponse> ReactivateAsync(
+        int userId, int databaseId, CancellationToken ct = default)
+    {
+        var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)
+            ?? throw new NotFoundException("Base de datos no encontrada.");
+
+        if (!string.Equals(detail.Status, "Inactive", StringComparison.OrdinalIgnoreCase))
+            throw new AppException(
+                "Solo se puede reactivar una base de datos que esté inactiva.",
+                StatusCodes.Status400BadRequest);
+
+        var provisioner = _factory.Get(detail.Engine);
+
+        // Mismo orden que DeactivateAsync — motor primero, catálogo después —
+        // pero por una razón distinta, que conviene dejar explícita porque el
+        // razonamiento de allá no aplica tal cual acá.
+        //
+        // Al desactivar, ese orden protege contra "el catálogo dice Inactive
+        // pero el usuario todavía puede conectarse". Al reactivar, protege
+        // contra el desbalance contrario: si el catálogo dijera 'Active' y el
+        // motor hubiera fallado, el usuario vería su BD como disponible sin
+        // poder conectarse, y la UI ni siquiera le ofrecería el botón de
+        // reactivar para reintentar (la guarda de arriba exige 'Inactive'), así
+        // que quedaría atascado.
+        //
+        // Con este orden, si falla el catálogo lo que queda es una BD
+        // físicamente habilitada pero marcada 'Inactive': el usuario todavía ve
+        // el botón, vuelve a pulsarlo, y como ReactivateAsync es idempotente en
+        // los cuatro motores el reintento se completa limpio. Es el estado
+        // desincronizado recuperable de los dos.
+        await provisioner.ReactivateAsync(detail.DbName, detail.LoginName, ct);
+        await _repo.ReactivateDatabaseAsync(databaseId, userId, ct);
+
+        detail.Status = "Active";
+        detail.PausedAt = null;
+        return MapToDetailResponse(detail, provisioner);
+    }
+
     public async Task DeleteAsync(int userId, int databaseId, CancellationToken ct = default)
     {
         var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)

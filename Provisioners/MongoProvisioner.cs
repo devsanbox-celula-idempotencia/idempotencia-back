@@ -97,6 +97,25 @@ public class MongoProvisioner : IDatabaseProvisioner
         await client.DropDatabaseAsync(dbName, ct);
     }
 
+    public async Task ReactivateAsync(string dbName, string login, CancellationToken ct = default)
+    {
+        var db = new MongoClient(_adminConnectionString).GetDatabase(dbName);
+
+        // Inverso del vaciado de roles de DeactivateAsync. El comentario de ese
+        // método advertía que habría que "recordar el rol/BD original" para
+        // poder revertirlo; no hace falta guardarlo en ningún lado porque
+        // CreateAsync siempre otorga exactamente el mismo rol: readWrite
+        // scoped a la propia BD del estudiante, nunca nada más amplio. Si algún
+        // día CreateAsync empieza a otorgar roles variables, este método tiene
+        // que dejar de asumirlo y el rol tendrá que persistirse en el catálogo.
+        var updateUser = new BsonDocument
+        {
+            { "updateUser", login },
+            { "roles", new BsonArray { new BsonDocument { { "role", "readWrite" }, { "db", dbName } } } }
+        };
+        await db.RunCommandAsync<BsonDocument>(updateUser, cancellationToken: ct);
+    }
+
     public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)
     {
         var db = new MongoClient(_adminConnectionString).GetDatabase(dbName);
