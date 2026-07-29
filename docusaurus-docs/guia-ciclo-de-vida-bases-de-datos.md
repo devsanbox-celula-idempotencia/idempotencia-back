@@ -15,22 +15,23 @@ eliminarla, y resetear su contraseña si se olvidó. Para la creación
 
 ---
 
-## 1. Resumen de los 4 endpoints
+## 1. Resumen de los 5 endpoints
 
 | Método | Ruta | Qué hace | Requiere que la BD esté en estado |
 |---|---|---|---|
 | `GET` | `/databases/{id}` | Detalle de una BD puntual (host, puerto, usuario — nunca la contraseña) | Cualquiera (mientras no esté `Deleted`) |
 | `POST` | `/databases/{id}/deactivate` | Revoca el acceso físico (login/usuario deshabilitado en el motor), sin borrar datos | `Active` |
+| `POST` | `/databases/{id}/reactivate` | Restaura el acceso revocado por `deactivate` | `Inactive` |
 | `DELETE` | `/databases/{id}` | Borrado físico real e irreversible | `Inactive` |
 | `POST` | `/databases/{id}/reset-password` | Genera contraseña nueva y la envía por correo | `Active` |
 
-Los 4 requieren `Authorization: Bearer <token>` y solo operan sobre BDs del
+Los 5 requieren `Authorization: Bearer <token>` y solo operan sobre BDs del
 usuario autenticado — un `id` que existe pero es de otro usuario devuelve
 `404` (mismo mensaje que "no existe", a propósito, para no revelar IDs
 ajenos).
 
-Los 3 que modifican estado (`deactivate`, `DELETE`, `reset-password`)
-comparten el rate limit `db-provisioning`: **5 peticiones/min por usuario**
+Los 4 que modifican estado (`deactivate`, `reactivate`, `DELETE`,
+`reset-password`) comparten el rate limit `db-provisioning`: **5 peticiones/min por usuario**
 (el mismo cupo que `POST /databases`, no uno adicional — tenlo en cuenta si
 tu UI permite encadenar varias de estas acciones rápido).
 
@@ -42,8 +43,17 @@ POST /databases/{id}/deactivate  → un solo clic de "desactivar", con advertenc
 DELETE /databases/{id}        → habilitado en la UI SOLO cuando status === "Inactive"
 ```
 
-No existe (todavía) un endpoint para "reactivar" — trata la desactivación
-como un paso serio, no como una pausa trivialmente reversible desde la UI.
+Y si el usuario se arrepiente después de desactivar:
+
+```
+POST /databases/{id}/reactivate  → vuelve a "Active", mismos datos y contraseña
+```
+
+Desactivar **ya es reversible** (desde 2026-07-29): con
+`POST /databases/{id}/reactivate` la BD vuelve a `Active` con sus datos y su
+contraseña intactos. Preséntalo en la UI como pausar/reanudar. Lo irreversible
+sigue siendo el `DELETE`, y por eso exige pasar primero por `Inactive`: esa
+transición es la confirmación real, no la desactivación en sí.
 
 ---
 
@@ -124,14 +134,61 @@ async function deactivateDatabase(token, databaseId) {
 }
 ```
 
-**UX recomendada:** trátalo como una acción destructiva de primer nivel —
-modal de confirmación explícito ("Esto desconectará tu base de datos. No hay
-forma de reactivarla desde aquí."), no un toggle casual.
+**UX recomendada:** un toggle de pausar/reanudar es apropiado, ahora que
+existe `reactivate`. Basta con una confirmación ligera del tipo "Tu base de
+datos dejará de aceptar conexiones. Puedes reactivarla cuando quieras y tus
+datos no se pierden". Reserva el modal de confirmación fuerte para el
+`DELETE`, que sí es irreversible.
 
 **Errores:**
 | Código | Causa | Mensaje |
 |---|---|---|
 | `400` | La BD no está `Active` (ya estaba inactiva o eliminada) | `"Solo se puede desactivar una base de datos que esté activa."` |
+| `401` | Token inválido | — |
+| `404` | No existe o no es tuya | `"Base de datos no encontrada."` |
+| `429` | Más de 5/min de este usuario | Ver header `Retry-After` |
+
+---
+
+## 3b. `POST /databases/{id}/reactivate` — Reactivar
+
+La operación inversa de la anterior: le devuelve al login/usuario la capacidad
+de conectarse en el motor y la BD vuelve a `Active`. Requiere que esté
+`Inactive`.
+
+Lo que hay que tener claro para la UI: **la contraseña no cambia**. Desactivar
+nunca borró ni rotó nada, solo revocó la conexión, así que el estudiante se
+reconecta con exactamente las mismas credenciales que ya tenía. No encadenes un
+`reset-password` después de reactivar.
+
+```js
+async function reactivateDatabase(token, databaseId) {
+  const res = await fetch(`https://<host>/databases/${databaseId}/reactivate`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  if (res.status === 429) {
+    throw new Error(`Demasiadas solicitudes, reintenta en ${res.headers.get("Retry-After")}s`);
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? "Error inesperado");
+  }
+
+  return res.json(); // mismo shape que el detalle, con status: "Active" y pausedAt: null
+}
+```
+
+**Si falla, deja que el usuario reintente.** La operación es idempotente en los
+cuatro motores, así que volver a pulsar el botón es seguro y de hecho es la
+forma prevista de recuperarse de un fallo a mitad de camino. No deshabilites el
+botón tras un error.
+
+**Errores:**
+| Código | Causa | Mensaje |
+|---|---|---|
+| `400` | La BD no está `Inactive` (sigue activa, o ya fue eliminada) | `"Solo se puede reactivar una base de datos que esté inactiva."` |
 | `401` | Token inválido | — |
 | `404` | No existe o no es tuya | `"Base de datos no encontrada."` |
 | `429` | Más de 5/min de este usuario | Ver header `Retry-After` |
@@ -226,12 +283,16 @@ con la contraseña.
 ## 6. Checklist para la UI
 
 - [ ] El botón "Eliminar" solo está habilitado cuando `status === "Inactive"`.
-- [ ] Desactivar tiene un modal de confirmación explícito (acción seria, sin
-      "reactivar" disponible hoy).
+- [ ] Con `status === "Active"` se muestra "Desactivar"; con `"Inactive"` se
+      muestra "Reactivar". Nunca los dos a la vez.
+- [ ] El modal de confirmación fuerte está en "Eliminar" (irreversible), no en
+      "Desactivar" (reversible con `reactivate`).
+- [ ] Un fallo al reactivar NO deshabilita el botón: la operación es
+      idempotente y reintentar es la forma prevista de recuperarse.
 - [ ] "Olvidé mi contraseña" muestra un mensaje de "revisa tu correo", nunca
       espera ni muestra una contraseña en pantalla.
-- [ ] Los 3 endpoints de escritura (`deactivate`, `DELETE`, `reset-password`)
-      manejan `429` leyendo `Retry-After` — comparten cupo con
+- [ ] Los 4 endpoints de escritura (`deactivate`, `reactivate`, `DELETE`,
+      `reset-password`) manejan `429` leyendo `Retry-After` — comparten cupo con
       `POST /databases`, así que un usuario que crea y desactiva BDs seguido
       puede toparse con el límite más rápido de lo esperado.
 - [ ] El detalle (`GET /databases/{id}`) se usa para refrescar el estado

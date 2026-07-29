@@ -85,6 +85,21 @@ public class DatabasesController : ControllerBase
     }
 
     /// <summary>
+    /// Restaura el acceso a una BD desactivada (<c>Status = "Inactive"</c>) y
+    /// la devuelve a <c>"Active"</c>. Los datos nunca se borraron al
+    /// desactivar, así que la BD vuelve tal cual estaba y con la misma
+    /// contraseña — no hace falta resetearla.
+    /// </summary>
+    [HttpPost("{id:int}/reactivate")]
+    [EnableRateLimiting("db-provisioning")]
+    public async Task<ActionResult<DatabaseDetailResponse>> Reactivate(int id, CancellationToken ct)
+    {
+        var userId = GetUserId();
+        var detail = await _provisioning.ReactivateAsync(userId, id, ct);
+        return Ok(detail);
+    }
+
+    /// <summary>
     /// Elimina definitivamente la BD (borrado físico real) — solo permitido
     /// si ya está desactivada (<c>Status = "Inactive"</c>).
     /// </summary>

@@ -87,6 +87,17 @@ public class PostgresProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"ALTER ROLE {QuoteIdentifier(login)} NOLOGIN", ct);
     }
 
+    public async Task ReactivateAsync(string dbName, string login, CancellationToken ct = default)
+    {
+        await using var conn = new NpgsqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        // Inverso exacto del NOLOGIN de DeactivateAsync. El rol conserva la
+        // propiedad de la BD y todos sus privilegios; solo se le devuelve la
+        // capacidad de iniciar sesión.
+        await ExecAsync(conn, $"ALTER ROLE {QuoteIdentifier(login)} LOGIN", ct);
+    }
+
     public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)
     {
         await using var conn = new NpgsqlConnection(_adminConnectionString);

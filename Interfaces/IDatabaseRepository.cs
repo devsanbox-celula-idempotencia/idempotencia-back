@@ -54,6 +54,14 @@ public interface IDatabaseRepository
     Task DeactivateDatabaseAsync(int databaseId, int userId, CancellationToken ct = default);
 
     /// <summary>
+    /// Invoca <c>sp_ReactivateDatabase</c>: devuelve la BD a 'Active', limpia
+    /// <c>PausedAt</c> y refresca <c>LastActivityAt</c> (reactivar es una
+    /// acción explícita del usuario, a diferencia de la medición de tamaño).
+    /// El SP re-valida ownership y que el estado actual sea 'Inactive'.
+    /// </summary>
+    Task ReactivateDatabaseAsync(int databaseId, int userId, CancellationToken ct = default);
+
+    /// <summary>
     /// Invoca <c>sp_DeleteDatabase</c>: marca la BD como 'Deleted' y registra
     /// <c>DeletedAt</c>. Se llama DESPUÉS de que el borrado físico
     /// (<see cref="idempotencia.Interfaces.IDatabaseProvisioner.DropAsync"/>)

@@ -1140,6 +1140,61 @@ ajustar:
 
 ---
 
+### 26. Desactivar una BD era un camino sin retorno: faltaba el endpoint de reactivar — IMPLEMENTADO
+**Estado:** 🟡 Fix implementado 2026-07-29, **pendiente de ejecutar el SP y de
+desplegar**. Cierra el punto 7 del backlog de `docs/claude.md`.
+**Tipo:** Funcionalidad faltante (no era una limitación técnica).
+**Dónde:** [`Controllers/DatabasesController.cs`](../Controllers/DatabasesController.cs),
+[`Services/DatabaseProvisioningService.cs`](../Services/DatabaseProvisioningService.cs),
+los cuatro provisioners, y el SP nuevo en
+[`sql/2026-07-29-reactivate.sql`](../sql/2026-07-29-reactivate.sql).
+**Problema:** `POST /databases/{id}/deactivate` revoca el acceso pero **nunca
+borra los datos** — la BD física y su contenido siguen intactos, solo el
+login queda deshabilitado. Aun así, la única transición disponible desde
+`Inactive` era `DELETE`, que sí es irreversible. En la práctica un estudiante
+que desactivaba por error perdía su base: la UI solo le ofrecía borrarla. La
+documentación llegó a recomendar tratarlo como "una acción destructiva de
+primer nivel", que era la consecuencia de la carencia, no una decisión de
+diseño.
+**Solución aplicada:** `POST /databases/{id}/reactivate`, la inversa exacta de
+desactivar. Cada provisioner deshace lo suyo — `ALTER LOGIN ... ENABLE` en SQL
+Server, `ACCOUNT UNLOCK` en MySQL, `ALTER ROLE ... LOGIN` en PostgreSQL, y en
+Mongo se restituye el rol `readWrite` sobre la propia BD. El SP nuevo
+`sp_ReactivateDatabase` pasa el estado de `Inactive` a `Active`, pone
+`PausedAt` en `NULL` y **sí** refresca `LastActivityAt` (a diferencia de
+`sp_UpdateDatabaseSize`, que a propósito no la toca: medir el tamaño lo hace un
+job, pero reactivar es una acción explícita del estudiante; sin esto el futuro
+job de TTL del ítem 11 volvería a pausar una BD recién reactivada en su
+siguiente pasada).
+
+**Nota sobre Mongo:** el comentario de `DeactivateAsync` advertía que para
+revertir "habría que recordar el rol/BD original". No hizo falta persistirlo:
+`CreateAsync` siempre otorga exactamente el mismo rol (`readWrite` scoped a la
+BD del estudiante, nunca nada más amplio), así que `ReactivateAsync` lo
+reconstruye. Queda anotado en el código que si algún día `CreateAsync` empieza
+a otorgar roles variables, esa suposición deja de valer y el rol tendrá que
+guardarse en el catálogo.
+
+**Orden de operaciones — motor primero, catálogo después.** Es el mismo orden
+que `DeactivateAsync` pero por una razón distinta, y conviene no copiar el
+razonamiento de allá sin pensarlo. Al desactivar, ese orden evita que el
+catálogo diga `Inactive` mientras el usuario todavía puede conectarse. Al
+reactivar, evita el desbalance contrario: si el catálogo dijera `Active` y el
+motor hubiera fallado, el usuario vería su BD como disponible sin poder
+conectarse, y **la UI ni siquiera le ofrecería el botón de reactivar** para
+reintentar, porque la guarda exige `Inactive` — quedaría atascado sin salida.
+Con el orden elegido, un fallo del catálogo deja una BD físicamente habilitada
+pero marcada `Inactive`: el botón sigue visible, el usuario lo vuelve a pulsar
+y, como la operación es idempotente en los cuatro motores, el reintento
+termina limpio. De los dos estados desincronizados posibles, se eligió el
+recuperable. Es la misma lección del ítem 24.
+
+**Pendiente:** ejecutar `sql/2026-07-29-reactivate.sql` (después del script del
+ítem 24 — no se puede reactivar algo que nunca logró llegar a `Inactive`),
+compilar y desplegar.
+
+---
+
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
@@ -1174,3 +1229,4 @@ ajustar:
 | 23 | GitHub reingresa sin pedir credenciales tras logout | ⚪ N/A | 🟢 No es bug (SSO esperado) |
 | 24 | `POST /databases/{id}/deactivate` siempre falla: `sp_DeactivateDatabase` escribe `'Inactive'` y `CK_ProvDb_Status` solo permite `'Paused'` (error 547) | 🔴 Alta (funcionalidad rota + catálogo desincronizado) | 🔴 Abierto (fix es un `ALTER TABLE`, ver ítem 24) |
 | 25 | `currentSizeMB` nunca se actualizaba: ningún SP lo escribía y no había job que midiera | 🟠 Media (dato falso expuesto en la API, en los 4 motores) | 🟡 Fix implementado (`DatabaseSizeMonitor` + 2 SPs); falta ejecutar el script SQL, compilar y desplegar |
+| 26 | Desactivar era un camino sin retorno: faltaba `POST /databases/{id}/reactivate` pese a que los datos nunca se borran | 🟠 Media (pérdida de acceso evitable por un clic del usuario) | 🟡 Implementado (`sp_ReactivateDatabase` + endpoint); falta ejecutar el script SQL, compilar y desplegar |

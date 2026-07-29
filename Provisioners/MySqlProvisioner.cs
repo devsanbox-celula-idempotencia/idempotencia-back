@@ -85,6 +85,18 @@ public class MySqlProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"ALTER USER {user} ACCOUNT LOCK", ct);
     }
 
+    public async Task ReactivateAsync(string dbName, string login, CancellationToken ct = default)
+    {
+        await using var conn = new MySqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        var user = $"{QuoteLiteral(login)}@'%'";
+        // Inverso exacto del ACCOUNT LOCK de DeactivateAsync. Los privilegios
+        // sobre la BD (GRANT ... ON db.*) nunca se revocaron, así que
+        // desbloquear la cuenta deja al usuario como estaba.
+        await ExecAsync(conn, $"ALTER USER {user} ACCOUNT UNLOCK", ct);
+    }
+
     public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)
     {
         await using var conn = new MySqlConnection(_adminConnectionString);

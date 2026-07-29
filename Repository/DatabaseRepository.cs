@@ -85,6 +85,15 @@ public class DatabaseRepository : IDatabaseRepository
             "EXEC sp_DeactivateDatabase @DatabaseId, @UserId", new object[] { pDatabaseId, pUserId }, ct);
     }
 
+    public async Task ReactivateDatabaseAsync(int databaseId, int userId, CancellationToken ct = default)
+    {
+        var pDatabaseId = new SqlParameter("@DatabaseId", System.Data.SqlDbType.Int) { Value = databaseId };
+        var pUserId = new SqlParameter("@UserId", System.Data.SqlDbType.Int) { Value = userId };
+
+        await _db.Database.ExecuteSqlRawAsync(
+            "EXEC sp_ReactivateDatabase @DatabaseId, @UserId", new object[] { pDatabaseId, pUserId }, ct);
+    }
+
     public async Task MarkDatabaseDeletedAsync(int databaseId, int userId, CancellationToken ct = default)
     {
         var pDatabaseId = new SqlParameter("@DatabaseId", System.Data.SqlDbType.Int) { Value = databaseId };
