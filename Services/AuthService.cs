@@ -64,25 +64,37 @@ public class AuthService : IAuthService
     {
         var login = await _users.GetLoginByEmailAsync(request.Email, ct);
 
-        // Mensaje genérico e IDÉNTICO para los tres casos que no requieren
-        // conocer la contraseña real (correo inexistente, cuenta solo-OAuth sin
-        // PasswordHash, contraseña incorrecta). Antes, el caso "solo-OAuth" se
-        // revisaba ANTES de verificar la contraseña y devolvía un mensaje
-        // distinto ("Esta cuenta usa inicio de sesión externo.") sin que el
-        // atacante necesitara acertar ninguna contraseña — eso permitía
-        // enumerar qué correos existen y cuáles son cuentas OAuth-only con
-        // solo mandar POST /auth/login con cualquier password. Ver
-        // docs/bugs.md ítem 14.
-        if (login is null || string.IsNullOrEmpty(login.PasswordHash) ||
-            !BCrypt.Net.BCrypt.Verify(request.Password, login.PasswordHash))
+        // DECISIÓN DE PRODUCTO (2026-07-29): cada motivo de fallo devuelve su
+        // propio mensaje, para que el usuario sepa qué corregir en vez de leer
+        // siempre "Credenciales inválidas.".
+        //
+        // ⚠️ Esto revierte a propósito el fix del ítem 14 de docs/bugs.md y
+        // reintroduce la enumeración de cuentas: mandando POST /auth/login con
+        // un correo y CUALQUIER contraseña, la respuesta ya revela si ese
+        // correo está registrado y si la cuenta se creó por OAuth. La única
+        // mitigación vigente es el rate limiting de la política "auth"
+        // ([EnableRateLimiting("auth")] en AuthController). Si más adelante se
+        // prioriza otra vez la privacidad sobre la claridad, basta con volver
+        // a colapsar los tres primeros casos en un solo mensaje genérico.
+
+        // 1. No hay ninguna cuenta con ese correo.
+        if (login is null)
+            throw new AuthException("No existe una cuenta registrada con ese correo.");
+
+        // 2. La cuenta existe pero se creó por Google/GitHub: nunca tuvo
+        //    contraseña local, así que no hay hash contra el cual verificar.
+        if (string.IsNullOrEmpty(login.PasswordHash))
         {
-            throw new AuthException("Credenciales inválidas.");
+            throw new AuthException(
+                "Esta cuenta se registró con un proveedor externo (Google o GitHub). " +
+                "Inicia sesión con ese proveedor.");
         }
 
-        // Este chequeo SÍ puede ir después y con mensaje distinto: para verlo,
-        // el atacante ya tuvo que acertar la contraseña real, así que el
-        // "leak" de que la cuenta existe y está inactiva ya no es explotable
-        // por fuerza bruta (si acertó la contraseña, ya sabía que la cuenta existe).
+        // 3. El correo existe y tiene contraseña local, pero no coincide.
+        if (!BCrypt.Net.BCrypt.Verify(request.Password, login.PasswordHash))
+            throw new AuthException("La contraseña es incorrecta.");
+
+        // 4. Credenciales correctas pero la cuenta está deshabilitada.
         if (!login.IsActive)
             throw new AuthException("La cuenta está inactiva.");
 

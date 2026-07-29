@@ -58,7 +58,7 @@ que el frontend sepa qué es seguro loguear/persistir y qué no:
 | `mySqlDatabase.password` / `password` en `POST /databases` | Una sola vez, al crearse la BD | **Alta sensibilidad** — es la contraseña real de una BD física. Se entrega UNA vez y no se puede recuperar después (el backend solo guarda el hash). Muéstrala al usuario y no la persistas en tu propio backend/logs. |
 | `host`, `port`, `loginName` de la BD | `POST /databases`, `mySqlDatabase` | Es la info de conexión de TU propia BD — necesaria para que puedas conectarte, no expone datos de otros. |
 | Datos de otras BDs/usuarios | — | `GET /databases` y `POST /databases` están filtrados por el `userId` del JWT (vía SP); no hay forma de pedir las BDs de otro usuario. |
-| Mensajes de error de login | `POST /auth/login` | Ver `docs/bugs.md` ítem 14 (ya corregido): el mensaje es **siempre** `"Credenciales inválidas."` sin importar si el correo no existe, la contraseña es incorrecta, o la cuenta es solo-OAuth — así no se puede enumerar qué correos están registrados. |
+| Mensajes de error de login | `POST /auth/login` | **Riesgo asumido desde 2026-07-29** — ver `docs/bugs.md` ítem 14, sección "Reversión". El mensaje distingue "correo no registrado", "cuenta OAuth-only" y "contraseña incorrecta", así que un tercero puede confirmar si un correo está registrado mandando `POST /auth/login` con cualquier contraseña. Se aceptó a cambio de claridad para el usuario; lo único que contiene el sondeo es el rate limit de 10 intentos/min por IP. |
 | PII en el redirect OAuth | `email`, `fullName`, `role`, `userId`, `token` en la query string | **Hallazgo abierto** — ver `docs/bugs.md` ítems 1 y 15. El navegador guarda esto en su historial y puede quedar en logs de acceso del servidor/proxy. Limpia la URL (`history.replaceState`) apenas la leas (ver sección 4.3). |
 | Stack traces / detalles internos de excepciones | — | Nunca se exponen. Todo error no controlado devuelve un mensaje genérico (`"Ocurrió un error inesperado."` o `"Ocurrió un error al procesar la solicitud."`); el detalle real solo queda en los logs del servidor. |
 | `PasswordHash` de usuarios | — | Nunca se serializa en ninguna respuesta; se usa solo internamente para verificar con BCrypt. |
@@ -201,10 +201,22 @@ contraseña (no tenía BD MySQL todavía); si no, es `null`.
 | Código | Cuándo | Mensaje exacto |
 |---|---|---|
 | `400` | Body inválido (email mal formado, password vacío) | `ValidationProblemDetails` estándar |
-| `401` | Correo no existe, contraseña incorrecta, **o la cuenta es solo-OAuth sin password** | `"Credenciales inválidas."` — siempre el mismo mensaje para los tres casos, a propósito (ver `bugs.md` ítem 14). **No asumas que puedes distinguir "correo no existe" de "password incorrecto" desde el frontend; no es posible ni debe serlo.** |
+| `401` | No hay ninguna cuenta con ese correo | `"No existe una cuenta registrada con ese correo."` |
+| `401` | La cuenta existe pero se creó por Google/GitHub y no tiene contraseña local | `"Esta cuenta se registró con un proveedor externo (Google o GitHub). Inicia sesión con ese proveedor."` |
+| `401` | El correo existe y tiene contraseña local, pero no coincide | `"La contraseña es incorrecta."` |
 | `401` | Credenciales correctas pero la cuenta está inactiva (`IsActive = false`) | `"La cuenta está inactiva."` |
 | `429` | Más de 10 intentos/min desde la misma IP | `"Demasiadas solicitudes. Inténtalo más tarde."` |
 | `500` | Error inesperado | `"Ocurrió un error al procesar la solicitud."` |
+
+> **Cambio 2026-07-29:** hasta esta fecha los tres primeros casos devolvían un
+> único mensaje `"Credenciales inválidas."` para no revelar qué correos están
+> registrados. Por decisión de producto ahora cada caso tiene mensaje propio
+> (ver `bugs.md` ítem 14, sección "Reversión"). Si tu frontend hacía
+> `if (error === 'Credenciales inválidas.')`, ese `if` ya no entra nunca.
+> **No compares el texto exacto**: encadena por `status` y usa el `error` como
+> texto a mostrar; si necesitas ramificar (p. ej. mostrar los botones de
+> Google/GitHub), haz una comprobación tolerante (`error.includes('proveedor
+> externo')`) para que un ajuste de redacción no rompa la pantalla.
 
 ---
 
