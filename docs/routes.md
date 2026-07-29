@@ -2,6 +2,10 @@
 
 > Generado analizando el código fuente (`Controllers/`, `Program.cs`) y probando
 > el arranque real de la app (`dotnet build` + `dotnet run`) el 2026-07-21.
+> Última revisión de sincronía código ↔ docs: **2026-07-27** (sesión 12 —
+> sin cambios de rutas ni de atributos de auth/rate-limit respecto al estado
+> de la sesión 11; los 13 endpoints y sus metadatos coinciden exactamente con
+> `Controllers/`).
 > **Este documento debe actualizarse cada vez que cambien las rutas** (ver nota
 > al final y `CLAUDE.md`).
 
