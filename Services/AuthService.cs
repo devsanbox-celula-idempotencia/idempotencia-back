@@ -10,16 +10,41 @@ namespace idempotencia.Services;
 /// hashea/verifica contraseñas con BCrypt (SQL no valida el hash), invoca los
 /// SPs vía repositorio y firma el JWT. No implementa reglas de negocio de
 /// dominio: crear/vincular usuarios es responsabilidad de los SPs.
+///
+/// También dispara el aprovisionamiento automático de la BD MySQL del usuario
+/// la primera vez que inicia sesión — ver <see cref="EnsureMySqlDatabaseAsync"/>.
+/// En register/login por contraseña las credenciales vuelven en el AuthResponse
+/// (JSON). En OAuth (<see cref="ExternalLoginAsync"/>) la respuesta viaja por
+/// redirect/query string, donde no se puede entregar un secreto de forma
+/// segura, así que las credenciales se envían por CORREO — ver docs/bugs.md
+/// ítem 16.
 /// </summary>
 public class AuthService : IAuthService
 {
+    /// <summary>Nombre lógico pedido al SP; este ya antepone el prefijo por usuario.</summary>
+    private const string AutoProvisionedMySqlDbName = "principal";
+
     private readonly IUserRepository _users;
     private readonly IJwtTokenService _jwt;
+    private readonly IDatabaseRepository _databases;
+    private readonly IDatabaseProvisioningService _provisioning;
+    private readonly IEmailService _email;
+    private readonly ILogger<AuthService> _logger;
 
-    public AuthService(IUserRepository users, IJwtTokenService jwt)
+    public AuthService(
+        IUserRepository users,
+        IJwtTokenService jwt,
+        IDatabaseRepository databases,
+        IDatabaseProvisioningService provisioning,
+        IEmailService email,
+        ILogger<AuthService> logger)
     {
         _users = users;
         _jwt = jwt;
+        _databases = databases;
+        _provisioning = provisioning;
+        _email = email;
+        _logger = logger;
     }
 
     public async Task<AuthResponse> RegisterAsync(RegisterRequest request, CancellationToken ct = default)
@@ -30,25 +55,46 @@ public class AuthService : IAuthService
         var identity = await _users.RegisterUserAsync(
             request.Email, passwordHash, request.FullName, ct);
 
-        return _jwt.CreateToken(identity);
+        var response = _jwt.CreateToken(identity);
+        response.MySqlDatabase = await EnsureMySqlDatabaseAsync(identity.UserId, ct);
+        return response;
     }
 
     public async Task<AuthResponse> LoginAsync(LoginRequest request, CancellationToken ct = default)
     {
         var login = await _users.GetLoginByEmailAsync(request.Email, ct);
 
-        // Mensaje genérico para no revelar si el correo existe.
+        // DECISIÓN DE PRODUCTO (2026-07-29): cada motivo de fallo devuelve su
+        // propio mensaje, para que el usuario sepa qué corregir en vez de leer
+        // siempre "Credenciales inválidas.".
+        //
+        // ⚠️ Esto revierte a propósito el fix del ítem 14 de docs/bugs.md y
+        // reintroduce la enumeración de cuentas: mandando POST /auth/login con
+        // un correo y CUALQUIER contraseña, la respuesta ya revela si ese
+        // correo está registrado y si la cuenta se creó por OAuth. La única
+        // mitigación vigente es el rate limiting de la política "auth"
+        // ([EnableRateLimiting("auth")] en AuthController). Si más adelante se
+        // prioriza otra vez la privacidad sobre la claridad, basta con volver
+        // a colapsar los tres primeros casos en un solo mensaje genérico.
+
+        // 1. No hay ninguna cuenta con ese correo.
         if (login is null)
-            throw new AuthException("Credenciales inválidas.");
+            throw new AuthException("No existe una cuenta registrada con ese correo.");
 
-        // Usuario creado solo por OAuth: no tiene contraseña local.
+        // 2. La cuenta existe pero se creó por Google/GitHub: nunca tuvo
+        //    contraseña local, así que no hay hash contra el cual verificar.
         if (string.IsNullOrEmpty(login.PasswordHash))
-            throw new AuthException("Esta cuenta usa inicio de sesión externo.");
+        {
+            throw new AuthException(
+                "Esta cuenta se registró con un proveedor externo (Google o GitHub). " +
+                "Inicia sesión con ese proveedor.");
+        }
 
-        // La verificación del hash ocurre en el backend, nunca en SQL.
+        // 3. El correo existe y tiene contraseña local, pero no coincide.
         if (!BCrypt.Net.BCrypt.Verify(request.Password, login.PasswordHash))
-            throw new AuthException("Credenciales inválidas.");
+            throw new AuthException("La contraseña es incorrecta.");
 
+        // 4. Credenciales correctas pero la cuenta está deshabilitada.
         if (!login.IsActive)
             throw new AuthException("La cuenta está inactiva.");
 
@@ -60,7 +106,9 @@ public class AuthService : IAuthService
             Role = login.Role
         };
 
-        return _jwt.CreateToken(identity);
+        var response = _jwt.CreateToken(identity);
+        response.MySqlDatabase = await EnsureMySqlDatabaseAsync(identity.UserId, ct);
+        return response;
     }
 
     public async Task<AuthResponse> ExternalLoginAsync(
@@ -71,6 +119,102 @@ public class AuthService : IAuthService
         var identity = await _users.UpsertExternalLoginAsync(
             provider, providerUserId, email, fullName, ct);
 
+        // Igual que register/login, en el primer inicio de sesión se aprovisiona
+        // la BD MySQL. PERO este AuthResponse nunca se serializa como JSON:
+        // AuthController.ExternalCallback lo pasa a OAuthRedirectBuilder, que
+        // arma una redirección con query string y NO reenvía MySqlDatabase (con
+        // razón — sería exponer la contraseña real de la BD en la URL, historial
+        // del navegador y logs). Por eso, cuando se crea la BD en este flujo, las
+        // credenciales se entregan por CORREO (el único canal seguro para un
+        // secreto de un solo uso acá) y NO se poblan en la respuesta. Así se
+        // evita tanto la BD huérfana como la exposición en la URL. Ver bugs.md
+        // ítem 16.
+        var credentials = await EnsureMySqlDatabaseAsync(identity.UserId, ct);
+        if (credentials is not null)
+            await SendFirstDatabaseEmailAsync(identity.UserId, email, fullName, credentials, ct);
+
         return _jwt.CreateToken(identity);
+    }
+
+    /// <summary>
+    /// Envía por correo las credenciales de la BD MySQL recién auto-aprovisionada
+    /// en un login por OAuth. Es el canal seguro que reemplaza al AuthResponse
+    /// (que en OAuth se pierde en el redirect). NO bloquea ni revierte el login
+    /// si el correo falla: la BD ya existe y el usuario puede regenerar la
+    /// contraseña con <c>POST /databases/{id}/reset-password</c> (que también la
+    /// manda por correo). El error queda en logs.
+    /// </summary>
+    private async Task SendFirstDatabaseEmailAsync(
+        int userId, string email, string fullName,
+        ProvisionedDatabaseCredentials credentials, CancellationToken ct)
+    {
+        try
+        {
+            await _email.SendAsync(
+                email,
+                string.IsNullOrWhiteSpace(fullName) ? email : fullName,
+                "Tu primera base de datos en Colmena",
+                EmailTemplates.FirstDatabaseCredentials(credentials),
+                ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Se aprovisionó la BD MySQL {DatabaseId} para el usuario {UserId} en " +
+                "login OAuth, pero falló el envío del correo con las credenciales. La " +
+                "BD existe; el usuario puede regenerar la contraseña con " +
+                "POST /databases/{{id}}/reset-password.",
+                credentials.DatabaseId, userId);
+        }
+    }
+
+    /// <summary>
+    /// Si el usuario aún no tiene ninguna BD MySQL en el catálogo, la
+    /// aprovisiona automáticamente (requisito: "al iniciar sesión por primera
+    /// vez deberá crearse automáticamente una base de datos MySQL"). Idempotente
+    /// entre logins: solo crea si <c>sp_GetUserDatabases</c> no devuelve ya una
+    /// fila con Engine=MySql para este usuario.
+    ///
+    /// Deliberadamente NO propaga la excepción si el aprovisionamiento falla
+    /// (motor caído, cuota agotada, etc.): la autenticación es una
+    /// responsabilidad separada y no debe romperse por un problema de
+    /// infraestructura de bases de datos. El error queda en logs para
+    /// diagnóstico; el frontend recibirá <c>MySqlDatabase = null</c> y puede
+    /// reintentar más tarde vía <c>POST /databases</c>.
+    /// </summary>
+    private async Task<ProvisionedDatabaseCredentials?> EnsureMySqlDatabaseAsync(
+        int userId, CancellationToken ct)
+    {
+        try
+        {
+            var existing = await _databases.GetUserDatabasesAsync(userId, ct);
+            var alreadyHasMySql = existing.Any(db =>
+                string.Equals(db.Engine, DatabaseEngine.MySql, StringComparison.OrdinalIgnoreCase));
+
+            if (alreadyHasMySql)
+                return null;
+
+            var result = await _provisioning.ProvisionAsync(
+                userId, DatabaseEngine.MySql, AutoProvisionedMySqlDbName, ct: ct);
+
+            return new ProvisionedDatabaseCredentials
+            {
+                DatabaseId = result.DatabaseId,
+                Engine = result.Engine,
+                DbName = result.DbName,
+                Host = result.Host,
+                Port = result.Port,
+                LoginName = result.LoginName,
+                Password = result.Password
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "No se pudo auto-aprovisionar la BD MySQL para el usuario {UserId}. " +
+                "El login continúa igual; el usuario puede reintentar vía POST /databases.",
+                userId);
+            return null;
+        }
     }
 }

@@ -1,6 +1,67 @@
 @idempotencia_HostAddress = http://localhost:5175
 
-GET {{idempotencia_HostAddress}}/weatherforecast/
-Accept: application/json
+### Registro por contraseña (dispara auto-aprovisionamiento de BD MySQL en el primer login)
+POST {{idempotencia_HostAddress}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "ana@uni.edu",
+  "password": "Segura12",
+  "fullName": "Ana Perez"
+}
+
+### Login por contraseña
+# @name login
+POST {{idempotencia_HostAddress}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "ana@uni.edu",
+  "password": "Segura12"
+}
+
+### Login OAuth (abrir en el navegador; redirige a Google/GitHub)
+GET {{idempotencia_HostAddress}}/auth/google/login
+
+###
+GET {{idempotencia_HostAddress}}/auth/github/login
+
+### Token reutilizable para los endpoints protegidos (tomado del login de arriba)
+@token = {{login.response.body.token}}
+
+### Crear una BD del motor indicado
+POST {{idempotencia_HostAddress}}/databases
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "engine": "SqlServer",
+  "dbName": "proyecto_ana",
+  "maxConcurrentConnections": 10
+}
+
+### Listar las BDs del usuario autenticado
+GET {{idempotencia_HostAddress}}/databases
+Authorization: Bearer {{token}}
+
+### Detalle de una BD puntual (host/puerto/usuario; nunca la contraseña)
+GET {{idempotencia_HostAddress}}/databases/1
+Authorization: Bearer {{token}}
+
+### Desactivar una BD (revoca acceso fisico; requerido antes de eliminar)
+POST {{idempotencia_HostAddress}}/databases/1/deactivate
+Authorization: Bearer {{token}}
+
+### Eliminar una BD (solo si ya esta Inactive)
+DELETE {{idempotencia_HostAddress}}/databases/1
+Authorization: Bearer {{token}}
+
+### Resetear la contraseña de una BD (la nueva se envia solo por correo)
+POST {{idempotencia_HostAddress}}/databases/1/reset-password
+Authorization: Bearer {{token}}
+
+### Estadisticas de plataforma (requiere token con rol Admin)
+GET {{idempotencia_HostAddress}}/statistics
+Authorization: Bearer {{token}}
 
 ###

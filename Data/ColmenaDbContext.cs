@@ -3,6 +3,12 @@ using Microsoft.EntityFrameworkCore;
 
 namespace idempotencia.Data;
 
+/// <summary>
+/// DbContext de Colmena. Se usa EXCLUSIVAMENTE como mapeador para ejecutar
+/// Stored Procedures (arquitectura database-centric). Todos los tipos son "sin
+/// clave" (<c>HasNoKey()</c>) porque solo representan conjuntos de resultados de
+/// los SPs, no tablas de escritura.
+/// </summary>
 public class ColmenaDbContext : DbContext
 {
     public ColmenaDbContext(DbContextOptions<ColmenaDbContext> options)
@@ -14,14 +20,16 @@ public class ColmenaDbContext : DbContext
     public DbSet<LoginInfo> LoginInfos => Set<LoginInfo>();
     public DbSet<UserIdentity> UserIdentities => Set<UserIdentity>();
     public DbSet<ProvisionedDatabaseInfo> ProvisionedDatabases => Set<ProvisionedDatabaseInfo>();
-    public DbSet<NewDatabaseResult> NewDatabaseResults => Set<NewDatabaseResult>();
+    public DbSet<ProvisionedDatabaseDetail> ProvisionedDatabaseDetails => Set<ProvisionedDatabaseDetail>();
+    public DbSet<DatabaseReservation> DatabaseReservations => Set<DatabaseReservation>();
+    public DbSet<PlatformStatistics> PlatformStatistics => Set<PlatformStatistics>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
 
-        // Se marcan como keyless: EF no los rastrea ni intenta crear tablas.
-        // ToView(null) evita que EF asuma una tabla/vista física subyacente.
+        // keyless: EF no rastrea ni intenta crear tablas. ToView(null) evita que
+        // asuma una tabla/vista física subyacente.
         modelBuilder.Entity<LoginInfo>(e =>
         {
             e.HasNoKey();
@@ -38,9 +46,28 @@ public class ColmenaDbContext : DbContext
         {
             e.HasNoKey();
             e.ToView(null);
+            // Tipo explícito del decimal: sin esto EF Core avisa que puede
+            // truncar en silencio los valores de CurrentSizeMB que devuelve
+            // sp_GetUserDatabases si exceden la precisión/escala por defecto.
+            e.Property(p => p.CurrentSizeMB).HasColumnType("decimal(10,2)");
         });
 
-        modelBuilder.Entity<NewDatabaseResult>(e =>
+        modelBuilder.Entity<DatabaseReservation>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+        });
+
+        modelBuilder.Entity<ProvisionedDatabaseDetail>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            // Mismo motivo que ProvisionedDatabaseInfo: sp_GetDatabaseDetail
+            // también devuelve CurrentSizeMB como decimal.
+            e.Property(p => p.CurrentSizeMB).HasColumnType("decimal(10,2)");
+        });
+
+        modelBuilder.Entity<PlatformStatistics>(e =>
         {
             e.HasNoKey();
             e.ToView(null);
