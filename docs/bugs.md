@@ -520,15 +520,28 @@ de esa contraseña (`sp_ConfirmDatabase`), y el valor en texto plano se
 descartaba sin que el usuario lo viera jamás — una BD aprovisionada
 permanentemente inutilizable, porque no hay (todavía) una función de "resetear
 contraseña" para BDs provisionadas.
-**Solución aplicada:** se quitó la llamada a `EnsureMySqlDatabaseAsync` de
-`ExternalLoginAsync`. Los usuarios que entran por OAuth ya NO obtienen su BD
-MySQL automáticamente en el primer login.
-**Lo que el frontend debe hacer en su lugar:** llamar `POST /databases`
-(`{"engine": "MySql", "dbName": "principal"}`) explícitamente apenas aterriza
-en `/oauth/callback`, idealmente solo si `GET /databases` viene vacío (mismo
-chequeo de "primera vez" que ya hace el backend para login por contraseña).
-Esa respuesta sí es JSON normal y sí entrega las credenciales de forma segura.
-Ver `docs/API.md` sección 3.1 y 4.3, actualizadas con esta nota.
+**Solución inicial (2026-07-22):** se quitó la llamada a
+`EnsureMySqlDatabaseAsync` de `ExternalLoginAsync`. Los usuarios que entraban
+por OAuth NO obtenían su BD MySQL automáticamente; el frontend debía llamar
+`POST /databases` explícitamente tras el callback.
+
+**Solución final (2026-07-23) — auto-aprovisionar + entregar por correo:** a
+pedido del equipo, se reactivó el auto-aprovisionamiento en OAuth resolviendo
+el nudo de la contraseña por el canal que faltaba: el **correo**.
+`ExternalLoginAsync` vuelve a llamar `EnsureMySqlDatabaseAsync` y, si crea la
+BD, envía las credenciales completas (host/puerto/BD/usuario/contraseña) al
+correo del usuario vía `IEmailService`
+([`EmailTemplates.FirstDatabaseCredentials`](../Services/EmailTemplates.cs)),
+reutilizando el mismo SMTP del reset de contraseña. La contraseña **no** se
+pobla en el `AuthResponse` (se perdería/expondría en el redirect) — el correo
+es el único canal. El envío es **no bloqueante**: si el correo falla, el login
+continúa, la BD ya existe y el usuario puede regenerar la contraseña con
+`POST /databases/{id}/reset-password` (que también la manda por correo), así
+que ya no hay riesgo de BD huérfana permanente. El frontend ya **no** necesita
+llamar `POST /databases` tras un login OAuth para la BD "principal" (puede
+seguir creando BDs adicionales). Ver `docs/API.md` §5.4 (actualizada). Cambio
+de código verificado por lectura; falta un `dotnet build`/arranque para
+confirmarlo en ejecución.
 
 ---
 

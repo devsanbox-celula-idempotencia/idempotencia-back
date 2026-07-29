@@ -267,41 +267,27 @@ implementar la ruta `/oauth/callback` para leer esos query params.
 >    (o navegar a otra ruta) para que esos valores no queden en el historial
 >    del navegador ni se reenvíen si el usuario comparte la URL.
 
-### 5.4 ⚠️ OAuth NO auto-aprovisiona la BD MySQL — el frontend debe pedirla
+### 5.4 OAuth auto-aprovisiona la BD MySQL y envía las credenciales por correo
 
-A diferencia del login por contraseña (sección 4.1), el login por OAuth **NO**
-crea automáticamente la BD MySQL del usuario. Motivo técnico (`bugs.md` ítem
-16): la respuesta de OAuth viaja por redirect/query string, y no hay forma
-segura de meter ahí una contraseña real de BD sin empeorar el hallazgo de la
-nota de seguridad de arriba — antes de este fix, se generaba la BD igual y la
-contraseña se perdía para siempre sin que el usuario la viera.
+Igual que el login por contraseña (sección 4.1), el login por OAuth **sí** crea
+automáticamente la BD MySQL del usuario la primera vez. La diferencia es **cómo**
+se entregan las credenciales: como la respuesta de OAuth viaja por
+redirect/query string (donde no es seguro meter una contraseña real — ver la
+nota de seguridad de arriba y `bugs.md` ítem 16), el backend envía las
+credenciales completas (host, puerto, base de datos, usuario y contraseña) al
+**correo** del usuario. **El frontend no necesita hacer nada** para la BD
+"principal" tras un login OAuth: no hay que llamar `POST /databases`.
 
-**Lo que el frontend debe hacer:** apenas resuelva el login OAuth (leyó el
-token del query string), comprobar si es la primera vez del usuario y, si es
-así, pedir la BD manualmente:
+Detalles a tener en cuenta:
 
-```js
-async function ensureMySqlDatabaseAfterOAuth(token) {
-  const existing = await fetch("https://localhost:7113/databases", {
-    headers: { Authorization: `Bearer ${token}` }
-  }).then(r => r.json());
-
-  const hasMySql = existing.some(db => db.engine === "MySql");
-  if (hasMySql) return null;
-
-  const res = await fetch("https://localhost:7113/databases", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`
-    },
-    body: JSON.stringify({ engine: "MySql", dbName: "principal" })
-  });
-
-  if (!res.ok) return null; // no bloquear el login por esto
-  return res.json(); // incluye password — muéstrasela al usuario ahora
-}
-```
+- La contraseña NO viene en el redirect ni en ninguna respuesta HTTP del login
+  OAuth — solo en el correo. Es un secreto de un solo uso.
+- El envío es best-effort: si el correo llegara a fallar, el login igual
+  funciona y la BD queda creada; el usuario puede regenerar la contraseña con
+  `POST /databases/{id}/reset-password` (sección 6.6), que también la manda por
+  correo.
+- `POST /databases` sigue disponible para crear BDs adicionales o de otros
+  motores (sección 6.1).
 
 ---
 
@@ -333,9 +319,9 @@ repetirse en bucle.
 | `dbName` | Sí | Solo letras, números y guion bajo, debe **empezar con una letra** y tener al menos 3 caracteres (máx. 128). Sin espacios ni símbolos — se valida así a propósito para no arriesgar caracteres raros en la construcción del DDL de cada motor. El backend le antepone un prefijo por usuario (ej. `colmena_u12_...`). |
 | `maxConcurrentConnections` | No | Entero 1-100. Si se omite, usa el default del motor (hoy 5). El backend SIEMPRE lo acota a un tope duro por motor (hoy 20) sin importar lo que pidas. Solo tiene efecto real en **MySQL** y **Postgres**; en **SqlServer**/**Mongo** se ignora (`bugs.md` ítem 12). |
 
-> No necesitas llamar este endpoint para tu primera BD MySQL si entraste por
-> contraseña (sección 4.1). Si entraste por OAuth, sí necesitas llamarlo tú
-> (sección 5.4). Úsalo también para BDs adicionales o de otro motor.
+> No necesitas llamar este endpoint para tu primera BD MySQL: si entraste por
+> contraseña llega en la respuesta (sección 4.1), y si entraste por OAuth llega
+> por correo (sección 5.4). Úsalo para BDs adicionales o de otro motor.
 
 **Respuesta `201 Created`:**
 ```json
@@ -675,9 +661,9 @@ async function handleOAuthCallback() {
   // Limpiar la URL cuanto antes (nota de seguridad, sección 5.3).
   window.history.replaceState(null, "", "/oauth/callback");
 
-  // OAuth no auto-aprovisiona MySQL (sección 5.4) — pedirlo si hace falta.
-  const db = await ensureMySqlDatabaseAfterOAuth(token);
-  if (db) showDatabaseCredentialsOnce(db);
+  // La BD MySQL "principal" se auto-aprovisiona en el backend y sus credenciales
+  // llegan por correo (sección 5.4) — el front no tiene que pedirla. Usar
+  // POST /databases solo para BDs adicionales o de otro motor.
 }
 ```
 
@@ -709,9 +695,9 @@ async function getMyDatabases() {
 |----------|--------|
 | `POST /auth/register` | ⚠️ Código completo; depende de `sp_RegisterUser` (confirmado en vivo funcionando, sin el bug de `Roles` — `bugs.md` ítem 9) |
 | `POST /auth/login` | ✅ Confirmado en vivo funcionando. Enumeración de cuentas OAuth-only corregida (`bugs.md` ítem 14). |
-| Google / GitHub OAuth | ⚠️ Funcional (rate limit `oauth` 20/min/IP agregado — `bugs.md` ítem 2). El `redirect_uri_mismatch` de QA quedó resuelto y confirmado (`bugs.md` ítem 17). Todavía expone PII + token en query string (`bugs.md` ítems 1 y 15, abiertos) — el front debe limpiar la URL (sección 5.3). Ya NO auto-aprovisiona MySQL (`bugs.md` ítem 16) — el front debe pedirlo (sección 5.4). |
+| Google / GitHub OAuth | ⚠️ Funcional (rate limit `oauth` 20/min/IP agregado — `bugs.md` ítem 2). El `redirect_uri_mismatch` de QA quedó resuelto y confirmado (`bugs.md` ítem 17). Auto-aprovisiona la BD MySQL y envía las credenciales por correo (`bugs.md` ítem 16) — el front no necesita pedirla (sección 5.4). Todavía expone PII + token en query string (`bugs.md` ítems 1 y 15, abiertos) — el front debe limpiar la URL (sección 5.3). |
 | `POST /databases` (los 4 motores) | ⚠️ Los 4 provisioners están implementados; depende de `sp_ReserveDatabase`/`sp_ConfirmDatabase`/`sp_FailDatabase`. Rate limit dedicado (5/min/usuario) y `maxConcurrentConnections` configurable agregados. |
-| Auto-aprovisionamiento MySQL en primer login/registro por contraseña | ✅ Implementado. NO aplica a OAuth (ver arriba). |
+| Auto-aprovisionamiento MySQL en primer login | ✅ Implementado en los tres flujos: register/login por contraseña (credenciales en el JSON) y OAuth (credenciales por correo — `bugs.md` ítem 16). |
 | `GET /databases` | ⚠️ Código completo; depende de `sp_GetUserDatabases`. No confirmado si `currentSizeMB` refleja tamaño real (`bugs.md` ítem 10). |
 | `GET /databases/{id}` (detalle) | ✅ Desplegado y confirmado en vivo (2026-07-23) — `sp_GetDatabaseDetail` ya está en la BD real (`bugs.md` ítem 19, 🟢). |
 | `POST /databases/{id}/deactivate` | ✅ Desplegado y confirmado (2026-07-23) — `sp_DeactivateDatabase` en la BD real. Revoca acceso físico sin borrar datos. |
