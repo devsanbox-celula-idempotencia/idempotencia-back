@@ -399,11 +399,25 @@ entregan una vez, en el momento de la creación (sección 6.1 / 4.1). Si el
 usuario las perdió, hoy no existe un endpoint para regenerarlas (ver
 `bugs.md`, backlog).
 
-> ⚠️ Sobre `currentSizeMB`: no está confirmado que refleje el tamaño real y
-> actualizado de la BD física en todos los motores — no hay (todavía) un job
-> que sincronice esto contra MySQL/Postgres/Mongo en vivo. Ver `bugs.md` ítem
-> 10. Trátalo como informativo, no como fuente de verdad para bloquear
-> escrituras del lado del frontend.
+> ℹ️ **Sobre `currentSizeMB` — léelo antes de dibujar una barra de uso.**
+> Hasta el 2026-07-29 este campo era ficticio: se fijaba al crear la BD y no
+> cambiaba nunca. Ya está corregido (`bugs.md` ítem 25): un job en el backend
+> mide el tamaño real en cada motor y lo sincroniza **cada 15 minutos**.
+>
+> Lo que eso implica para la UI: el dato es real pero **no es instantáneo**. Si
+> el estudiante acaba de cargar datos y refresca, es normal que todavía vea el
+> valor anterior. No presentes el número como si fuera en vivo — sirve un
+> "actualizado periódicamente" cerca del indicador, y no dispares alertas
+> basadas en que el valor no se movió tras una carga.
+>
+> Ojo con SQL Server: ahí la cuota **sí** se aplica de verdad en el motor
+> (`MAXSIZE` en el `CREATE DATABASE`), así que el estudiante puede toparse con
+> un error de espacio del motor antes de que el indicador alcance a reflejar
+> que estaba llegando al límite. Aplicar la cuota en MySQL/Postgres/Mongo sigue
+> pendiente (`bugs.md` ítem 10): ahí el número sube pero nadie lo frena.
+>
+> Mientras el fix no esté desplegado en el ambiente que estés consumiendo, el
+> campo se comporta como antes (siempre el mismo valor).
 
 **Errores/excepciones posibles:**
 | Código | Cuándo |
@@ -710,7 +724,7 @@ async function getMyDatabases() {
 | Google / GitHub OAuth | ⚠️ Funcional (rate limit `oauth` 20/min/IP agregado — `bugs.md` ítem 2). El `redirect_uri_mismatch` de QA quedó resuelto y confirmado (`bugs.md` ítem 17). Auto-aprovisiona la BD MySQL y envía las credenciales por correo (`bugs.md` ítem 16) — el front no necesita pedirla (sección 5.4). Todavía expone PII + token en query string (`bugs.md` ítems 1 y 15, abiertos) — el front debe limpiar la URL (sección 5.3). |
 | `POST /databases` (los 4 motores) | ⚠️ Los 4 provisioners están implementados; depende de `sp_ReserveDatabase`/`sp_ConfirmDatabase`/`sp_FailDatabase`. Rate limit dedicado (5/min/usuario) y `maxConcurrentConnections` configurable agregados. |
 | Auto-aprovisionamiento MySQL en primer login | ✅ Implementado en los tres flujos: register/login por contraseña (credenciales en el JSON) y OAuth (credenciales por correo — `bugs.md` ítem 16). |
-| `GET /databases` | ⚠️ Código completo; depende de `sp_GetUserDatabases`. No confirmado si `currentSizeMB` refleja tamaño real (`bugs.md` ítem 10). |
+| `GET /databases` | ⚠️ Código completo; depende de `sp_GetUserDatabases`. `currentSizeMB` ya refleja el tamaño real, sincronizado cada 15 min por un job (`bugs.md` ítem 25) — no es un valor en vivo. |
 | `GET /databases/{id}` (detalle) | ✅ Desplegado y confirmado en vivo (2026-07-23) — `sp_GetDatabaseDetail` ya está en la BD real (`bugs.md` ítem 19, 🟢). |
 | `POST /databases/{id}/deactivate` | ✅ Desplegado y confirmado (2026-07-23) — `sp_DeactivateDatabase` en la BD real. Revoca acceso físico sin borrar datos. |
 | `DELETE /databases/{id}` | ✅ Desplegado y confirmado (2026-07-23) — `sp_DeleteDatabase` en la BD real. Borrado físico real, solo si la BD está `Inactive`. |

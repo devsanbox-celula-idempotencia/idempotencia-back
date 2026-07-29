@@ -33,6 +33,9 @@ builder.Services.Configure<FrontendSettings>(
 builder.Services.Configure<EmailSettings>(
     builder.Configuration.GetSection(EmailSettings.SectionName));
 
+builder.Services.Configure<SizeMonitorSettings>(
+    builder.Configuration.GetSection(SizeMonitorSettings.SectionName));
+
 
 builder.Services.AddDbContext<ColmenaDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("Colmena")));
@@ -55,6 +58,12 @@ builder.Services.AddScoped<IDatabaseProvisioner, SqlServerProvisioner>();
 builder.Services.AddScoped<IDatabaseProvisioner, PostgresProvisioner>();
 builder.Services.AddScoped<IDatabaseProvisioner, MySqlProvisioner>();
 builder.Services.AddScoped<IDatabaseProvisioner, MongoProvisioner>();
+
+// Job que mantiene CurrentSizeMB al día contra el tamaño real de cada motor.
+// Es Singleton (todo BackgroundService lo es), así que abre su propio scope de
+// DI en cada ciclo para poder usar los servicios Scoped de arriba. Ver
+// docs/bugs.md ítem 25; se apaga con Provisioning:SizeMonitor:Enabled=false.
+builder.Services.AddHostedService<DatabaseSizeMonitor>();
 
 
 builder.Services.AddAuthentication(options =>

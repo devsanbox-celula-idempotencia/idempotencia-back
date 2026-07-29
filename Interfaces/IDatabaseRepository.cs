@@ -69,4 +69,22 @@ public interface IDatabaseRepository
     /// </summary>
     Task ResetDatabasePasswordAsync(
         int databaseId, int userId, string newPasswordHash, CancellationToken ct = default);
+
+    /// <summary>
+    /// Invoca <c>sp_GetDatabasesForSizeSync</c>: devuelve TODAS las BDs
+    /// 'Active' de TODOS los usuarios. Es el único método del repositorio que
+    /// no filtra por usuario, a propósito: lo consume
+    /// <c>DatabaseSizeMonitor</c>, un job del sistema que no actúa en nombre de
+    /// ningún usuario autenticado. No exponerlo desde un controller.
+    /// </summary>
+    Task<IReadOnlyList<ProvisionedDatabaseInfo>> GetDatabasesForSizeSyncAsync(
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Invoca <c>sp_UpdateDatabaseSize</c>: persiste el tamaño real medido por
+    /// el <see cref="IDatabaseProvisioner"/> del motor correspondiente. Ver
+    /// docs/bugs.md ítem 25.
+    /// </summary>
+    Task UpdateDatabaseSizeAsync(
+        int databaseId, decimal currentSizeMb, CancellationToken ct = default);
 }

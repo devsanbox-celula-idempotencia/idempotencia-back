@@ -904,6 +904,242 @@ código.
 
 ---
 
+### 24. `POST /databases/{id}/deactivate` falla siempre: `sp_DeactivateDatabase` escribe `'Inactive'`, un valor que `CK_ProvDb_Status` no permite
+**Estado:** 🔴 Abierto — detectado en QA 2026-07-29 (logs del contenedor
+`idempotencia-qa-back`). Requiere cambio en la BD, no en el backend.
+**Tipo:** Bug funcional (desfase entre el vocabulario de estados del SP y el de
+la constraint) + estado desincronizado como efecto colateral.
+**Dónde:** BD `master`, tabla `dbo.ProvisionedDatabases` — constraint
+`CK_ProvDb_Status` y SP `sp_DeactivateDatabase`. Se manifiesta en
+[`Repository/DatabaseRepository.cs`](../Repository/DatabaseRepository.cs)
+`DeactivateDatabaseAsync`, llamado desde
+[`Services/DatabaseProvisioningService.cs`](../Services/DatabaseProvisioningService.cs)
+`DeactivateAsync`.
+**Síntoma:** todo intento de desactivar una BD devuelve `500` con
+`"Ocurrió un error al procesar la solicitud."`. En los logs:
+
+```
+Microsoft.Data.SqlClient.SqlException (0x80131904): The UPDATE statement
+conflicted with the CHECK constraint "CK_ProvDb_Status". The conflict occurred
+in database "master", table "dbo.ProvisionedDatabases", column 'Status'.
+Error Number:547
+```
+
+**Causa raíz:** los dos objetos usan vocabularios distintos para el mismo
+estado. La constraint permite `('Failed','Deleted','Paused','Active','Provisioning')`
+— nótese **`Paused`, no `Inactive`** — mientras que `sp_DeactivateDatabase`
+ejecuta `SET Status = 'Inactive'`. El `UPDATE` viola la constraint y SQL Server
+aborta con error 547. Todo el resto del sistema (C#, `docs/API.md`,
+`docusaurus-docs/guia-ciclo-de-vida-bases-de-datos.md`, el frontend) habla de
+`"Inactive"`: `DatabaseProvisioningService.DeactivateAsync` asigna
+`detail.Status = "Inactive"` y `DeleteAsync` exige `Status == "Inactive"` antes
+de permitir el borrado. El valor `'Paused'` de la constraint corresponde al
+vocabulario de la propuesta de TTL del ítem 11, que **no está implementada**;
+nada en el código escribe `'Paused'` hoy.
+**Por qué no lo cubrió el mapper de errores:** `ApiExceptionMapper` traduce a
+`400` con el mensaje real solo los `SqlException` con `Number >= 50000` (los
+`THROW` intencionales de los SPs, como el `THROW 50010` que el propio
+`sp_DeactivateDatabase` usa para su guarda de pertenencia). El 547 es un error
+nativo del motor y cae en el `_ => 500` genérico. Es el comportamiento
+correcto — no se deben exponer detalles de constraints al cliente — pero
+implica que el síntoma visible para QA es un 500 opaco y el diagnóstico solo
+está en los logs del contenedor.
+**Efecto colateral — catálogo desincronizado:** `DeactivateAsync` revoca el
+acceso físico **antes** de actualizar el catálogo. El comentario del método
+justifica ese orden diciendo que así el catálogo "sigue reflejando la realidad"
+si algo falla, pero eso solo aplica cuando falla el motor. Acá pasa lo
+contrario: el `provisioner.DeactivateAsync` tiene éxito (login deshabilitado /
+`ACCOUNT LOCK` / `NOLOGIN` / roles vaciados) y **después** falla el catálogo.
+Resultado: filas que el catálogo reporta `Active` pero cuyo usuario ya no puede
+conectarse. En los logs de QA se ven cuatro intentos, así que hay al menos una
+BD en ese estado.
+**Solución propuesta (en la BD):** alinear la constraint al vocabulario que ya
+usa toda la aplicación, no al revés — cambiar el C# a `'Paused'` arrastraría el
+cambio a la API pública, la documentación y el frontend.
+
+```sql
+USE master;
+
+-- 1. Verificar si hay filas con el valor viejo antes de tocar nada.
+SELECT Status, COUNT(*) AS Filas
+FROM dbo.ProvisionedDatabases
+GROUP BY Status;
+
+-- 2. Reemplazar 'Paused' por 'Inactive' en el vocabulario permitido.
+ALTER TABLE dbo.ProvisionedDatabases DROP CONSTRAINT CK_ProvDb_Status;
+
+UPDATE dbo.ProvisionedDatabases
+SET Status = 'Inactive'
+WHERE Status = 'Paused';   -- no-op si el paso 1 devolvió 0 filas
+
+ALTER TABLE dbo.ProvisionedDatabases
+ADD CONSTRAINT CK_ProvDb_Status CHECK (
+    Status IN ('Provisioning', 'Active', 'Inactive', 'Failed', 'Deleted')
+);
+```
+
+**Verificar además:** que `sp_DeleteDatabase` (y cualquier otro SP que filtre
+por estado, p. ej. `sp_ResetDatabasePassword` o `sp_GetUserDatabases`) no tenga
+la guarda escrita contra `'Paused'`. Si `sp_DeleteDatabase` exige
+`Status = 'Paused'`, el borrado quedará roto igual que la desactivación en
+cuanto se aplique el fix de arriba. Revisar con `EXEC sp_helptext '<nombre>'`.
+**Reparación de las filas desincronizadas:** una vez aplicado el fix, basta con
+volver a llamar `POST /databases/{id}/deactivate` sobre las BDs afectadas. Los
+cuatro provisioners son idempotentes en `DeactivateAsync` (`ALTER LOGIN ...
+DISABLE` sobre un login ya deshabilitado, `ACCOUNT LOCK` sobre un usuario ya
+bloqueado, `ALTER ROLE ... NOLOGIN` sobre un rol ya sin login, y `updateUser`
+con `roles: []` sobre un usuario ya sin roles son todos no-ops exitosos), así
+que reintentar es seguro y deja catálogo y motor consistentes.
+**Deuda relacionada:** la columna se llama `PausedAt` pero el estado se llama
+`Inactive`. Esa inconsistencia de nombres es justamente lo que originó el
+desfase. Renombrar la columna implicaría tocar `ProvisionedDatabaseInfo`,
+`ProvisionedDatabaseDetail` y el campo `pausedAt` de la API, así que se deja
+como está y se documenta acá.
+**Nota:** la tabla vive en `master` (ver ítem 22), lo que hace que este tipo de
+cambio de esquema se aplique sobre una base de sistema.
+
+---
+
+### 25. `currentSizeMB` es un campo muerto: nadie lo escribe nunca, siempre reporta el valor de creación — CORREGIDO (pendiente de desplegar)
+**Estado:** 🟡 Fix implementado 2026-07-29, **pendiente de ejecutar el script
+SQL y de un `dotnet build`**. Confirmado antes por inspección de los SPs en QA.
+Sustituye la duda que quedaba abierta en `docs/API.md` y en el ítem 10 ("no
+está confirmado que refleje el tamaño real"): estaba confirmado que **no** lo
+reflejaba, en ningún motor.
+**Tipo:** Bug funcional (dato expuesto por la API que nunca corresponde a la
+realidad).
+**Dónde:** columna `ProvisionedDatabases.CurrentSizeMB` en `master`; expuesta
+por `sp_GetDatabaseDetail` y `sp_GetUserDatabases`, mapeada en
+[`Models/ProvisionedDatabaseInfo.cs`](../Models/ProvisionedDatabaseInfo.cs) y
+[`Models/ProvisionedDatabaseDetail.cs`](../Models/ProvisionedDatabaseDetail.cs),
+devuelta al frontend en `GET /databases` y `GET /databases/{id}`.
+**Evidencia:** `sp_GetDatabaseDetail` no calcula nada, solo lee la columna:
+
+```sql
+SELECT  pd.DatabaseId, pd.UserId, pd.Engine, pd.DbName, dc.LoginName, pd.Status,
+        pd.MaxStorageMB, pd.CurrentSizeMB, pd.LastActivityAt, pd.CreatedAt,
+        pd.PausedAt, pd.DeletedAt
+FROM ProvisionedDatabases pd
+INNER JOIN DatabaseCredentials dc ...
+```
+
+Del otro lado, **ningún** SP que el backend invoca recibe un parámetro de
+tamaño (`sp_ReserveDatabase`, `sp_ConfirmDatabase`, `sp_FailDatabase`,
+`sp_DeactivateDatabase`, `sp_DeleteDatabase`, `sp_ResetDatabasePassword`), y no
+existe ningún job ni `IHostedService` que mida las BDs físicas — el
+`DatabaseQuotaMonitor` propuesto en el ítem 10 nunca se implementó. Conclusión:
+el valor se fija en el `INSERT` de `sp_ReserveDatabase` y no vuelve a cambiar
+jamás. Es el mismo patrón de `LastActivityAt` descrito en el ítem 11 ("no
+existe ningún código que las actualice más allá de la creación inicial").
+**Impacto:** el frontend muestra un indicador de almacenamiento usado que es
+siempre el mismo número. Peor que no mostrarlo, porque parece un dato en vivo.
+Además hace imposible que el usuario anticipe el tope: en SQL Server la cuota
+**sí** se aplica de forma nativa (`MAXSIZE = {maxStorageMb}MB` en
+[`SqlServerProvisioner.cs`](../Provisioners/SqlServerProvisioner.cs)), así que
+el estudiante se topa con un error de espacio del motor sin que la UI le
+hubiera avisado que venía llegando al límite.
+**Por qué no basta con arreglar el SP:** el catálogo vive en SQL Server, y una
+instancia de SQL Server puede medir sus propias BDs (`sys.master_files`,
+`sp_spaceused`) pero **no** puede medir las de MySQL, PostgreSQL ni MongoDB,
+que están en otros motores. Calcular en vivo dentro de
+`sp_GetDatabaseDetail` daría un dato correcto solo para BDs de SQL Server y
+seguiría dando `0` para los otros tres — un comportamiento inconsistente que
+es peor de diagnosticar que el actual.
+**Solución propuesta (converge con el ítem 10):** la medición tiene que venir
+del backend, que sí habla los cuatro protocolos. Es exactamente la misma
+medición que necesita el enforcement de cuota del ítem 10, así que conviene
+implementarlas juntas:
+
+1. Agregar `Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct)`
+   a `IDatabaseProvisioner`, con una implementación por motor:
+   - MySQL: `SELECT SUM(data_length + index_length) FROM information_schema.tables WHERE table_schema = @dbName`
+   - PostgreSQL: `SELECT pg_database_size(@dbName)`
+   - SQL Server: `SELECT SUM(size) * 8.0 / 1024 FROM sys.master_files WHERE database_id = DB_ID(@dbName)`
+   - Mongo: `db.runCommand({ dbStats: 1 })` → `dataSize`
+2. Nueva SP de catálogo `sp_UpdateDatabaseSize(@DatabaseId, @CurrentSizeMB)` y
+   su método en `IDatabaseRepository`, mismo patrón que las existentes.
+3. Un `IHostedService` (`DatabaseQuotaMonitor`, el del ítem 10) que recorra
+   periódicamente las BDs `Active`, llame a `GetSizeMbAsync` y persista el
+   resultado. El mismo recorrido decide si hay que revocar escrituras por
+   exceder cuota, que es lo que pide el ítem 10.
+
+**Alternativa táctica descartada:** medir bajo demanda solo en
+`GET /databases/{id}`. Daría un dato real en el detalle sin job ni SPs nuevas,
+pero agrega una conexión al motor por cada request (latencia, y el endpoint
+pasa a fallar si el motor está caído) y no arregla `GET /databases`, donde
+habría que medir N bases por request. Se descartó a favor del job.
+
+**Solución aplicada (2026-07-29) — decisión: solo medición, sin enforcement.**
+Se implementó el camino completo de sincronización. El enforcement de cuota
+(revocar escrituras al pasarse) queda fuera de alcance y sigue en el ítem 10,
+que ahora solo necesita actuar sobre un dato que ya es real.
+
+*Medición, una por motor* — `GetSizeMbAsync` agregado a
+[`Interfaces/IDatabaseProvisioner.cs`](../Interfaces/IDatabaseProvisioner.cs) y
+a los cuatro provisioners. **En MySQL, PostgreSQL y Mongo no se creó ningún
+objeto**: el backend solo les lanza una consulta con la conexión admin que ya
+tenía. Cada motor reporta una noción distinta de "tamaño" y se eligió a
+propósito cuál usar:
+
+| Motor | Consulta | Qué mide y por qué esa |
+|---|---|---|
+| SQL Server | `SUM(size) * 8 / 1024` sobre `sys.master_files` | Espacio **asignado** a los archivos. Es contra lo que el motor aplica `MAXSIZE`, así que es lo que le importa al estudiante para saber cuánto le queda. |
+| MySQL | `SUM(data_length + index_length)` en `information_schema.tables` | Datos + índices. Es una **estimación** de InnoDB, no se actualiza en tiempo real; puede quedar algo por debajo justo tras una carga grande. |
+| PostgreSQL | `pg_database_size(@DbName)` | Tamaño real en disco de la BD completa. El más fiel de los cuatro: no es estimación. |
+| Mongo | `dbStats` → `storageSize + indexSize` | Espacio en disco ya comprimido, más índices. Se prefirió sobre `dataSize` (bytes lógicos sin comprimir) porque es lo comparable con los otros tres. |
+
+Los cuatro devuelven `0` en vez de lanzar si la BD ya no existe en el motor:
+para un job, una base desaparecida no es un error que deba abortar el ciclo.
+
+*Catálogo* — dos SPs nuevos en
+[`sql/2026-07-29-size-sync.sql`](../sql/2026-07-29-size-sync.sql), idempotente
+(`CREATE OR ALTER`): `sp_GetDatabasesForSizeSync` (todas las BDs `Active` de
+todos los usuarios; los SPs existentes no servían porque filtran por
+`@UserId` y el job no actúa en nombre de nadie — devuelve las mismas columnas
+que `sp_GetUserDatabases` para reusar el tipo `ProvisionedDatabaseInfo`) y
+`sp_UpdateDatabaseSize(@DatabaseId, @CurrentSizeMB)`. Este último **no** toca
+`LastActivityAt` a propósito: esa columna representa actividad del estudiante
+(ítem 11), y escribirla desde un job haría que ninguna BD pareciera nunca
+inactiva, rompiendo el futuro job de TTL antes de existir.
+
+*Job* — [`Services/DatabaseSizeMonitor.cs`](../Services/DatabaseSizeMonitor.cs),
+un `BackgroundService` que cada N minutos recorre las BDs activas, mide y
+persiste **solo lo que cambió** (evita escrituras inútiles y deja los logs de
+EF legibles). Es de mejor esfuerzo por diseño: timeout por base, todas las
+excepciones atrapadas y registradas por base, y nunca deja escapar una
+excepción — un `BackgroundService` que lo hace tumba el host completo. Abre su
+propio scope de DI en cada ciclo porque es Singleton y el repositorio y el
+factory son Scoped.
+
+*Configuración* — [`Services/SizeMonitorSettings.cs`](../Services/SizeMonitorSettings.cs),
+sección `Provisioning:SizeMonitor`. **No hace falta configurarla**: todos los
+valores tienen default y `appsettings.json` no está versionado. Si se quiere
+ajustar:
+
+```jsonc
+"Provisioning": {
+  "SizeMonitor": {
+    "Enabled": true,               // false para apagarlo (útil en local, donde
+                                   // no están los 4 motores levantados)
+    "IntervalMinutes": 15,
+    "StartupDelaySeconds": 30,     // margen para que los motores estén listos
+    "PerDatabaseTimeoutSeconds": 30
+  }
+}
+```
+
+**Pendiente antes de dar esto por cerrado:**
+1. Ejecutar `sql/2026-07-29-size-sync.sql` en la instancia del catálogo. Sin
+   esto el job falla en cada ciclo con "no existe el procedimiento" — queda en
+   los logs y no tumba nada, pero no sincroniza.
+2. `dotnet build` — no se pudo compilar en el entorno donde se escribió el fix
+   (sin SDK de .NET). Cambios verificados por lectura.
+3. Desplegar y esperar un ciclo; después verificar con la consulta que trae el
+   script al final. Si `CurrentSizeMB` sigue en `0.00` en todas las filas,
+   revisar `Enabled` y buscar "Sincronización de tamaños" en los logs.
+
+---
+
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
@@ -936,3 +1172,5 @@ código.
 | 21 | `POST /auth/register` aceptaba contraseñas de más de 12 caracteres (límite real de negocio) | 🟡 Media (falso positivo, dato inválido aceptado) | 🟢 Resuelto |
 | 22 | Connection string apunta a `Database=master` (funciona; mala práctica) — reportado por el front | 🟡 Config | 🔵 Conocido/aceptado (dejar como está) |
 | 23 | GitHub reingresa sin pedir credenciales tras logout | ⚪ N/A | 🟢 No es bug (SSO esperado) |
+| 24 | `POST /databases/{id}/deactivate` siempre falla: `sp_DeactivateDatabase` escribe `'Inactive'` y `CK_ProvDb_Status` solo permite `'Paused'` (error 547) | 🔴 Alta (funcionalidad rota + catálogo desincronizado) | 🔴 Abierto (fix es un `ALTER TABLE`, ver ítem 24) |
+| 25 | `currentSizeMB` nunca se actualizaba: ningún SP lo escribía y no había job que midiera | 🟠 Media (dato falso expuesto en la API, en los 4 motores) | 🟡 Fix implementado (`DatabaseSizeMonitor` + 2 SPs); falta ejecutar el script SQL, compilar y desplegar |

@@ -55,4 +55,19 @@ public interface IDatabaseProvisioner
     /// <see cref="ChangePasswordAsync"/>.
     /// </summary>
     Task DeactivateAsync(string dbName, string login, CancellationToken ct = default);
+
+    /// <summary>
+    /// Mide el tamaño real que ocupa la BD en el motor, en MB. Es la única
+    /// fuente de verdad posible para <c>CurrentSizeMB</c>: el catálogo vive en
+    /// SQL Server y no puede medir bases de MySQL/PostgreSQL/Mongo, así que la
+    /// medición tiene que salir de acá, donde sí se habla el protocolo de cada
+    /// motor. La consume <c>DatabaseSizeMonitor</c> — ver docs/bugs.md ítem 25.
+    ///
+    /// Cada motor reporta una noción de "tamaño" ligeramente distinta (espacio
+    /// asignado en disco vs. bytes de datos e índices); cada implementación
+    /// documenta cuál usa y por qué. Devuelve <c>0</c> si la BD ya no existe en
+    /// el motor, en vez de lanzar: para el job una base desaparecida no es un
+    /// error que deba abortar el ciclo.
+    /// </summary>
+    Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default);
 }

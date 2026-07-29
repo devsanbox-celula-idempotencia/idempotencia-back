@@ -105,4 +105,38 @@ public class DatabaseRepository : IDatabaseRepository
             "EXEC sp_ResetDatabasePassword @DatabaseId, @UserId, @PasswordHash",
             new object[] { pDatabaseId, pUserId, pHash }, ct);
     }
+
+    public async Task<IReadOnlyList<ProvisionedDatabaseInfo>> GetDatabasesForSizeSyncAsync(
+        CancellationToken ct = default)
+    {
+        // Sin parámetros: el job recorre todas las BDs activas de la
+        // plataforma, no las de un usuario. Reusa el mismo tipo de resultado
+        // que sp_GetUserDatabases porque el SP devuelve las mismas columnas.
+        var result = await _db.ProvisionedDatabases
+            .FromSqlRaw("EXEC sp_GetDatabasesForSizeSync")
+            .AsNoTracking()
+            .ToListAsync(ct);
+
+        return result;
+    }
+
+    public async Task UpdateDatabaseSizeAsync(
+        int databaseId, decimal currentSizeMb, CancellationToken ct = default)
+    {
+        var pDatabaseId = new SqlParameter("@DatabaseId", System.Data.SqlDbType.Int) { Value = databaseId };
+
+        // Precisión y escala explícitas para que coincidan con DECIMAL(10,2)
+        // del SP y de la columna; sin esto el driver infiere escala 0 y
+        // truncaría los decimales en silencio.
+        var pSize = new SqlParameter("@CurrentSizeMB", System.Data.SqlDbType.Decimal)
+        {
+            Precision = 10,
+            Scale = 2,
+            Value = currentSizeMb
+        };
+
+        await _db.Database.ExecuteSqlRawAsync(
+            "EXEC sp_UpdateDatabaseSize @DatabaseId, @CurrentSizeMB",
+            new object[] { pDatabaseId, pSize }, ct);
+    }
 }
