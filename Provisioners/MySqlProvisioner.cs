@@ -85,6 +85,31 @@ public class MySqlProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"ALTER USER {user} ACCOUNT LOCK", ct);
     }
 
+    public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)
+    {
+        await using var conn = new MySqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        // information_schema.tables da datos + índices por tabla; la suma sobre
+        // el schema es el tamaño de la BD. Es una ESTIMACIÓN del motor (InnoDB
+        // no actualiza estas estadísticas en tiempo real), así que puede quedar
+        // algo por debajo del tamaño real en disco justo después de una carga
+        // grande. Es suficiente para mostrarle el uso al estudiante; si alguna
+        // vez se usa para aplicar cuota (ítem 10), conviene revisar el margen.
+        //
+        // Si el schema no existe no hay filas y SUM devuelve NULL -> 0.
+        const string sql = @"
+            SELECT SUM(data_length + index_length) / 1024 / 1024
+            FROM information_schema.tables
+            WHERE table_schema = @DbName;";
+
+        await using var cmd = new MySqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@DbName", dbName);
+
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is null or DBNull ? 0m : Math.Round(Convert.ToDecimal(result), 2);
+    }
+
     private static async Task ExecAsync(MySqlConnection conn, string sql, CancellationToken ct)
     {
         await using var cmd = new MySqlCommand(sql, conn);

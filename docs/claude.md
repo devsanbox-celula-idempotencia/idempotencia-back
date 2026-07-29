@@ -673,6 +673,85 @@ y una prueba en vivo del correo (SMTP ya está configurado en `appsettings.json`
 
 ---
 
+## Sesión 14 — 2026-07-29 (QA: mensajes de login por caso, 547 al desactivar, y `currentSizeMB` deja de ser ficticio)
+
+**Pedido:** tres cosas encadenadas, todas surgidas de QA. (1) que el login diga
+"contraseña incorrecta" en vez del genérico "Credenciales inválidas"; (2)
+diagnosticar un error que salía al desactivar una BD; (3) verificar si el
+indicador de almacenamiento usado servía y, al confirmar que no, arreglarlo.
+
+**Qué se hizo:**
+
+1. **Mensajes de login específicos por caso** — decisión de producto que
+   revierte a propósito el fix del ítem 14. `LoginAsync` en
+   [`Services/AuthService.cs`](../Services/AuthService.cs) ahora distingue
+   correo no registrado, cuenta OAuth-only, contraseña incorrecta y cuenta
+   inactiva, cada uno con su 401 y su mensaje. Se dejó constancia del riesgo de
+   enumeración reintroducido (mitigado solo por el rate limit `auth` de 10/min)
+   en el ítem 14 y en `API.md`, junto con las alternativas por si más adelante
+   se prioriza la privacidad. El formato de la respuesta no cambió, así que el
+   front solo debe borrar cualquier comparación contra el string viejo.
+
+2. **Ítem 24 (nuevo, abierto) — `POST /databases/{id}/deactivate` fallaba
+   siempre con SQL 547.** Diagnosticado desde los logs del contenedor de QA:
+   `CK_ProvDb_Status` permite `('Failed','Deleted','Paused','Active','Provisioning')`
+   y `sp_DeactivateDatabase` escribe `'Inactive'`. El SP tiene razón y la
+   constraint está desactualizada: `'Paused'` viene del vocabulario de la
+   propuesta de TTL del ítem 11, que nunca se implementó, y nada en el código
+   escribe ese valor. **Pendiente de aplicar el `ALTER TABLE`** documentado en
+   el ítem 24. Efecto colateral a reparar: `DeactivateAsync` revoca el acceso
+   físico antes de tocar el catálogo, así que hay al menos una BD con el login
+   revocado pero marcada `Active`; se corrige reintentando el endpoint una vez
+   aplicado el fix (los cuatro provisioners son idempotentes en
+   `DeactivateAsync`).
+
+3. **Ítem 25 (nuevo) — `currentSizeMB` era un campo muerto, ahora se
+   sincroniza de verdad.** Confirmado con `sp_helptext`: `sp_GetDatabaseDetail`
+   solo hace `SELECT` de la columna, y ningún SP ni job la escribía después de
+   la creación. Implementado el camino completo de medición:
+   - `GetSizeMbAsync` agregado a
+     [`Interfaces/IDatabaseProvisioner.cs`](../Interfaces/IDatabaseProvisioner.cs)
+     y a los cuatro provisioners, cada uno con la consulta nativa de su motor
+     (`sys.master_files`, `information_schema.tables`, `pg_database_size`,
+     `dbStats`). **En los motores de los estudiantes no se creó nada**: solo se
+     les lanza una consulta con la conexión admin que ya existía.
+   - Dos SPs nuevos en el catálogo, en
+     [`sql/2026-07-29-size-sync.sql`](../sql/2026-07-29-size-sync.sql):
+     `sp_GetDatabasesForSizeSync` (todas las BDs activas, sin filtro por
+     usuario — el job no actúa en nombre de nadie) y `sp_UpdateDatabaseSize`.
+     **Pendiente de ejecutar en la BD.**
+   - Sus métodos en
+     [`Interfaces/IDatabaseRepository.cs`](../Interfaces/IDatabaseRepository.cs)
+     y [`Repository/DatabaseRepository.cs`](../Repository/DatabaseRepository.cs),
+     con `Precision`/`Scale` explícitos en el parámetro decimal para no truncar.
+   - [`Services/DatabaseSizeMonitor.cs`](../Services/DatabaseSizeMonitor.cs),
+     un `BackgroundService` que cada 15 minutos (configurable) recorre las BDs
+     activas, mide y persiste solo lo que cambió. Es de mejor esfuerzo: atrapa
+     todo por base, tiene timeout por base, y nunca deja escapar una excepción
+     que tumbe el host. Configurado por
+     [`Services/SizeMonitorSettings.cs`](../Services/SizeMonitorSettings.cs)
+     (sección `Provisioning:SizeMonitor`), con defaults que funcionan sin
+     configuración alguna.
+   - Registrado en [`Program.cs`](../Program.cs).
+
+**Qué queda pendiente:**
+- Ejecutar `sql/2026-07-29-size-sync.sql` y el `ALTER TABLE` del ítem 24 en la
+  BD de QA. Sin el primero, el job falla en cada ciclo con "no existe el
+  procedimiento" (queda en logs, no tumba nada).
+- Verificar `sp_DeleteDatabase` por si su guarda también está escrita contra
+  `'Paused'`.
+- `dotnet build`: no se pudo compilar en este entorno (sin SDK de .NET ni en el
+  contenedor ni en la máquina local). Todos los cambios están verificados por
+  lectura.
+- Reparar las BDs desincronizadas por el ítem 24 reintentando el deactivate.
+
+**Nota sobre configuración:** `appsettings.json` no está versionado
+(`.gitignore`), así que la sección `Provisioning:SizeMonitor` quedó documentada
+en el ítem 25 de `bugs.md` en vez de agregarse a un archivo. No hace falta
+tocarla para que el job corra: todos los valores tienen default.
+
+---
+
 ## Backlog / próximos pasos
 
 1. **Redesplegar el backend actual a QA** para que lleguen los fixes ya
@@ -703,12 +782,21 @@ y una prueba en vivo del correo (SMTP ya está configurado en `appsettings.json`
    `sp_DeactivateDatabase`/`sp_DeleteDatabase` — ítem 11 de `bugs.md`.
 7. **Endpoint de "reactivar" una BD desactivada** — hoy desactivar es
    unidireccional hacia eliminar.
-8. **Cuota de almacenamiento real** para Postgres/MySQL/Mongo — ítem 10.
-9. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
-   ítem 12.
-10. **Token JWT (y PII) en query string del redirect OAuth** — ítems 1 y 15
+8. **Aplicar la cuota de almacenamiento** en Postgres/MySQL/Mongo — ítem 10.
+   La MEDICIÓN ya está resuelta por el `DatabaseSizeMonitor` de la sesión 14
+   (ítem 25); lo que falta es actuar sobre ella: revocar escrituras al superar
+   `MaxStorageMB` y restaurarlas al volver a estar por debajo. Implica un
+   estado nuevo (`'OverQuota'`) en `CK_ProvDb_Status` y su SP.
+9. **Ejecutar en la BD de QA los dos scripts pendientes de la sesión 14:** el
+   `ALTER TABLE` de `CK_ProvDb_Status` (ítem 24, desbloquea desactivar) y
+   `sql/2026-07-29-size-sync.sql` (ítem 25, sin él el job no tiene SPs que
+   llamar). Verificar de paso que `sp_DeleteDatabase` no tenga su guarda
+   escrita contra `'Paused'`.
+10. **Límite de conexiones concurrentes en SQL Server** vía logon trigger —
+    ítem 12.
+11. **Token JWT (y PII) en query string del redirect OAuth** — ítems 1 y 15
     (mismo fix: intercambio por código de un solo uso).
-11. **Secretos reales en texto plano en `appsettings.json`** (incluye SMTP y,
+12. **Secretos reales en texto plano en `appsettings.json`** (incluye SMTP y,
     ahora explícito, las credenciales del `sa`) — ítem 3.
 
 **Resueltos/cerrados en la sesión 12 (revisión del front):** callback OAuth por

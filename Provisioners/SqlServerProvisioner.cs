@@ -117,6 +117,33 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"ALTER LOGIN {lg} DISABLE;", ct);
     }
 
+    public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)
+    {
+        await using var conn = new SqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        // sys.master_files reporta el espacio ASIGNADO a los archivos de la BD
+        // (datos + log), en páginas de 8 KB. Se usa ese número y no el espacio
+        // realmente ocupado dentro de los archivos porque es lo que se compara
+        // contra MAXSIZE: SQL Server aplica la cuota sobre el tamaño del
+        // archivo, así que es la métrica que le importa al estudiante para
+        // saber cuánto le queda antes de que el motor le rechace escrituras.
+        //
+        // Se consulta con parámetro y DB_ID en vez de concatenar el nombre.
+        // Si la BD no existe, DB_ID devuelve NULL, no hay filas, y SUM da NULL
+        // -> se traduce a 0 más abajo.
+        const string sql = @"
+            SELECT SUM(CAST(mf.size AS BIGINT)) * 8.0 / 1024.0
+            FROM sys.master_files mf
+            WHERE mf.database_id = DB_ID(@DbName);";
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add(new SqlParameter("@DbName", SqlDbType.NVarChar, 128) { Value = dbName });
+
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is null or DBNull ? 0m : Math.Round(Convert.ToDecimal(result), 2);
+    }
+
     private static async Task ExecAsync(SqlConnection conn, string sql, CancellationToken ct)
     {
         await using var cmd = new SqlCommand(sql, conn) { CommandType = CommandType.Text };

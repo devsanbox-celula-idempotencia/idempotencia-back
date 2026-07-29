@@ -87,6 +87,35 @@ public class PostgresProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"ALTER ROLE {QuoteIdentifier(login)} NOLOGIN", ct);
     }
 
+    public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)
+    {
+        await using var conn = new NpgsqlConnection(_adminConnectionString);
+        await conn.OpenAsync(ct);
+
+        // pg_database_size da el tamaño real en disco de la BD completa
+        // (incluye índices y catálogos internos). Es el número más fiel de los
+        // cuatro motores: no es una estimación, lo calcula el motor sobre los
+        // archivos.
+        //
+        // Se pasa el nombre como parámetro (texto), no concatenado. Si la BD no
+        // existe, pg_database_size lanza; se atrapa y se devuelve 0 para que el
+        // job no se caiga por una base que ya no está.
+        const string sql = "SELECT pg_database_size(@DbName) / 1024.0 / 1024.0;";
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@DbName", dbName);
+
+        try
+        {
+            var result = await cmd.ExecuteScalarAsync(ct);
+            return result is null or DBNull ? 0m : Math.Round(Convert.ToDecimal(result), 2);
+        }
+        catch (PostgresException ex) when (ex.SqlState == "3D000") // invalid_catalog_name
+        {
+            return 0m;
+        }
+    }
+
     private static async Task ExecAsync(NpgsqlConnection conn, string sql, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand(sql, conn);

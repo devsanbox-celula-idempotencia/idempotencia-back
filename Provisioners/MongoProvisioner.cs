@@ -96,4 +96,35 @@ public class MongoProvisioner : IDatabaseProvisioner
 
         await client.DropDatabaseAsync(dbName, ct);
     }
+
+    public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)
+    {
+        var db = new MongoClient(_adminConnectionString).GetDatabase(dbName);
+
+        // dbStats devuelve varias métricas; se usa storageSize (espacio que las
+        // colecciones ocupan en disco, ya comprimido) en vez de dataSize (bytes
+        // lógicos de los documentos, sin comprimir). storageSize es lo
+        // comparable con lo que reportan los otros tres motores y con lo que
+        // realmente consume del servidor compartido. Se suma indexSize porque
+        // los índices también ocupan y dbStats los deja aparte.
+        //
+        // Una BD que no existe en Mongo no es un error: dbStats sobre ella
+        // responde con ceros, así que el 0 sale solo.
+        try
+        {
+            var stats = await db.RunCommandAsync<BsonDocument>(
+                new BsonDocument { { "dbStats", 1 } }, cancellationToken: ct);
+
+            var storage = stats.GetValue("storageSize", 0).ToDouble();
+            var indexes = stats.GetValue("indexSize", 0).ToDouble();
+
+            return Math.Round((decimal)((storage + indexes) / 1024d / 1024d), 2);
+        }
+        catch (MongoException)
+        {
+            // Motor inalcanzable o BD en un estado inesperado: el job registra
+            // el fallo y sigue con las demás, no se aborta el ciclo.
+            return 0m;
+        }
+    }
 }
