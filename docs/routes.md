@@ -2,6 +2,10 @@
 
 > Generado analizando el código fuente (`Controllers/`, `Program.cs`) y probando
 > el arranque real de la app (`dotnet build` + `dotnet run`) el 2026-07-21.
+> Última revisión de sincronía código ↔ docs: **2026-07-27** (sesión 12 —
+> sin cambios de rutas ni de atributos de auth/rate-limit respecto al estado
+> de la sesión 11; los 13 endpoints y sus metadatos coinciden exactamente con
+> `Controllers/`).
 > **Este documento debe actualizarse cada vez que cambien las rutas** (ver nota
 > al final y `CLAUDE.md`).
 
@@ -29,9 +33,9 @@
 | POST | `/auth/register` | Anónimo | `auth` (10/min/IP) | ⚠️ Código completo; depende de `sp_RegisterUser` (confirmado en vivo, sin bug de `Roles`) | Hashea password con BCrypt en backend, el SP solo persiste. **Además dispara auto-aprovisionamiento de BD MySQL** (ver hallazgo 5). |
 | POST | `/auth/login` | Anónimo | `auth` (10/min/IP) | ✅ Confirmado en vivo | Bug de `sp_GetLoginByEmail` corregido (`bugs.md` ítem 9). Enumeración de cuentas OAuth-only corregida (`bugs.md` ítem 14). **Además dispara auto-aprovisionamiento de BD MySQL** (ver hallazgo 5). |
 | GET | `/auth/google/login` | Anónimo | `oauth` (20/min/IP) | ✅ Funcional | Redirige (`Challenge`) al flujo OAuth de Google. Credenciales configuradas en `appsettings.json`. |
-| GET | `/auth/google/callback` | Anónimo (cookie `External`) | `oauth` (20/min/IP) | ⚠️ Código completo; depende de `sp_UpsertExternalLogin` (sin confirmar en vivo) | Ver hallazgo sobre PII+token en query string en `bugs.md` ítems 1 y 15. **YA NO dispara auto-aprovisionamiento de BD MySQL** (removido, ver hallazgo 9) — el frontend debe pedirla explícitamente. |
+| GET | `/auth/google/callback` | Anónimo (cookie `External`) | `oauth` (20/min/IP) | ⚠️ Código completo; depende de `sp_UpsertExternalLogin` (sin confirmar en vivo) | Ver hallazgo sobre PII+token en query string en `bugs.md` ítems 1 y 15. **Auto-aprovisiona la BD MySQL en el primer login y envía las credenciales por correo** (ver hallazgo 9) — el frontend ya no necesita pedirla. |
 | GET | `/auth/github/login` | Anónimo | `oauth` (20/min/IP) | ✅ Funcional | Redirige al flujo OAuth de GitHub. |
-| GET | `/auth/github/callback` | Anónimo (cookie `External`) | `oauth` (20/min/IP) | ⚠️ Código completo; depende de `sp_UpsertExternalLogin` (sin confirmar en vivo) | Igual que Google callback — sin auto-aprovisionamiento (hallazgo 9). |
+| GET | `/auth/github/callback` | Anónimo (cookie `External`) | `oauth` (20/min/IP) | ⚠️ Código completo; depende de `sp_UpsertExternalLogin` (sin confirmar en vivo) | Igual que Google callback — auto-aprovisiona la BD MySQL y entrega las credenciales por correo (hallazgo 9). |
 | POST | `/databases` (cualquier `engine`) | JWT Bearer | **`db-provisioning` (5/min/usuario)** | ⚠️ Código completo; depende de `sp_ReserveDatabase` / `sp_ConfirmDatabase` / `sp_FailDatabase` | **Los 4 motores (`SqlServer`, `Postgres`, `MySql`, `Mongo`) tienen provisioner real implementado** (ver hallazgo 5 — esta fila corrige la versión anterior de esta tabla, que los describía como stubs). Rate limit dedicado agregado en esta revisión (antes solo el global). |
 | GET | `/databases` | JWT Bearer | Solo global | ⚠️ Código completo; depende de `sp_GetUserDatabases` | Lista las BDs del usuario autenticado (claim `UserId`). |
 | GET | `/databases/{id}` | JWT Bearer | Solo global | 🆕 Código completo; depende de `sp_GetDatabaseDetail` (nuevo, sin desplegar) | Detalle de una BD puntual (host/puerto/usuario/estado, nunca la contraseña) — para cuando el usuario perdió sus datos de conexión. 404 si no existe o no es del usuario (mismo mensaje para ambos casos, evita enumeración). |
@@ -101,12 +105,15 @@
    contraseña de la BD MySQL auto-aprovisionada en el flujo OAuth (ítem 16).
    Se documentó (sin corregir todavía) que el redirect OAuth expone más PII de
    la que se pensaba (ítem 15, amplía el ítem 1).
-9. **`ExternalLoginAsync` (callbacks OAuth) YA NO llama
-   `EnsureMySqlDatabaseAsync`** — ver `bugs.md` ítem 16. El auto-aprovisionamiento
-   de MySQL en primer login (hallazgo 5) ahora solo aplica a
-   `RegisterAsync`/`LoginAsync` (login por contraseña). El frontend debe pedir
-   `POST /databases` explícitamente tras un primer login OAuth — ver
-   `API.md` §5.4.
+9. **`ExternalLoginAsync` (callbacks OAuth) auto-aprovisiona la BD MySQL y
+   entrega las credenciales por correo** (actualizado 2026-07-23, `bugs.md`
+   ítem 16). El auto-aprovisionamiento de MySQL en primer login (hallazgo 5)
+   aplica a los tres flujos: `RegisterAsync`/`LoginAsync` entregan las
+   credenciales en el `AuthResponse` (JSON); `ExternalLoginAsync` las envía por
+   **correo**, porque su respuesta viaja por redirect/query string y ahí no se
+   puede entregar un secreto de forma segura. El frontend ya no necesita pedir
+   `POST /databases` tras un login OAuth para la BD "principal" — ver `API.md`
+   §5.4.
 10. **`POST /databases` ahora acepta `maxConcurrentConnections` opcional**
     (a pedido del usuario), acotado siempre a un cap por motor — ver `API.md`
     §6.1 y `bugs.md` ítem 12.

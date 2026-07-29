@@ -454,8 +454,8 @@ correr `show dbs`, MongoDB ya filtra por privilegio en ese comando.
 
 ---
 
-### 14. Enumeración de cuentas: `POST /auth/login` distinguía cuentas OAuth-only sin necesitar la contraseña — CORREGIDO
-**Estado:** 🟢 Resuelto.
+### 14. Enumeración de cuentas: `POST /auth/login` distinguía cuentas OAuth-only sin necesitar la contraseña — CORREGIDO, LUEGO REVERTIDO POR DECISIÓN DE PRODUCTO
+**Estado:** 🟠 Reabierto a propósito (2026-07-29) — ver "Reversión" al final.
 **Tipo:** Seguridad (enumeración de usuarios / fuga de información).
 **Dónde:** [`Services/AuthService.cs`](../Services/AuthService.cs) — `LoginAsync`.
 **Problema:** el orden de validaciones era: (1) correo no existe → genérico
@@ -474,6 +474,33 @@ enumeración de cuentas clásico.
 devuelve el mismo mensaje genérico `"Credenciales inválidas."`. El chequeo de
 `IsActive` se mantiene después (ya no es explotable: para verlo, el atacante
 ya tuvo que acertar la contraseña real).
+
+**Reversión (2026-07-29) — decisión de producto, con el riesgo asumido:** se
+volvió a separar el mensaje por caso porque `"Credenciales inválidas."` no le
+dice al usuario legítimo qué corregir. `LoginAsync` ahora responde 401 con:
+
+| Caso | Mensaje |
+|---|---|
+| El correo no está registrado | `No existe una cuenta registrada con ese correo.` |
+| Cuenta sin `PasswordHash` (creada por OAuth) | `Esta cuenta se registró con un proveedor externo (Google o GitHub). Inicia sesión con ese proveedor.` |
+| Contraseña que no coincide | `La contraseña es incorrecta.` |
+| Credenciales correctas, cuenta deshabilitada | `La cuenta está inactiva.` (sin cambios) |
+
+Con esto **vuelve a existir** el vector de enumeración descrito arriba: un
+tercero puede confirmar si un correo está registrado, y si es cuenta
+OAuth-only, mandando `POST /auth/login` con cualquier contraseña. Lo que
+contiene el abuso hoy es únicamente el rate limiting de la política `"auth"`
+(`[EnableRateLimiting("auth")]` sobre `Login` y `Register` en
+`AuthController`), que limita el ritmo de sondeo pero no lo impide.
+
+Alternativas que quedan sobre la mesa si más adelante se prioriza otra vez la
+privacidad: (a) mantener el mensaje genérico en el backend y devolver un
+`code` estructurado en el JSON de error solo para sesiones ya autenticadas o
+verificadas; (b) conservar el mensaje genérico y mover la ayuda al frontend
+(link a "recuperar contraseña" + botones de Google/GitHub siempre visibles
+bajo el formulario), que resuelve la misma queja de UX sin revelar nada.
+Revertir es barato: basta con volver a colapsar los tres primeros casos en una
+sola condición con un mensaje único.
 
 ---
 
@@ -520,15 +547,28 @@ de esa contraseña (`sp_ConfirmDatabase`), y el valor en texto plano se
 descartaba sin que el usuario lo viera jamás — una BD aprovisionada
 permanentemente inutilizable, porque no hay (todavía) una función de "resetear
 contraseña" para BDs provisionadas.
-**Solución aplicada:** se quitó la llamada a `EnsureMySqlDatabaseAsync` de
-`ExternalLoginAsync`. Los usuarios que entran por OAuth ya NO obtienen su BD
-MySQL automáticamente en el primer login.
-**Lo que el frontend debe hacer en su lugar:** llamar `POST /databases`
-(`{"engine": "MySql", "dbName": "principal"}`) explícitamente apenas aterriza
-en `/oauth/callback`, idealmente solo si `GET /databases` viene vacío (mismo
-chequeo de "primera vez" que ya hace el backend para login por contraseña).
-Esa respuesta sí es JSON normal y sí entrega las credenciales de forma segura.
-Ver `docs/API.md` sección 3.1 y 4.3, actualizadas con esta nota.
+**Solución inicial (2026-07-22):** se quitó la llamada a
+`EnsureMySqlDatabaseAsync` de `ExternalLoginAsync`. Los usuarios que entraban
+por OAuth NO obtenían su BD MySQL automáticamente; el frontend debía llamar
+`POST /databases` explícitamente tras el callback.
+
+**Solución final (2026-07-23) — auto-aprovisionar + entregar por correo:** a
+pedido del equipo, se reactivó el auto-aprovisionamiento en OAuth resolviendo
+el nudo de la contraseña por el canal que faltaba: el **correo**.
+`ExternalLoginAsync` vuelve a llamar `EnsureMySqlDatabaseAsync` y, si crea la
+BD, envía las credenciales completas (host/puerto/BD/usuario/contraseña) al
+correo del usuario vía `IEmailService`
+([`EmailTemplates.FirstDatabaseCredentials`](../Services/EmailTemplates.cs)),
+reutilizando el mismo SMTP del reset de contraseña. La contraseña **no** se
+pobla en el `AuthResponse` (se perdería/expondría en el redirect) — el correo
+es el único canal. El envío es **no bloqueante**: si el correo falla, el login
+continúa, la BD ya existe y el usuario puede regenerar la contraseña con
+`POST /databases/{id}/reset-password` (que también la manda por correo), así
+que ya no hay riesgo de BD huérfana permanente. El frontend ya **no** necesita
+llamar `POST /databases` tras un login OAuth para la BD "principal" (puede
+seguir creando BDs adicionales). Ver `docs/API.md` §5.4 (actualizada). Cambio
+de código verificado por lectura; falta un `dotnet build`/arranque para
+confirmarlo en ejecución.
 
 ---
 
@@ -867,13 +907,14 @@ código.
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
-> Resuelto (confirmado) · 🔵 Resuelto parcialmente.
+> Resuelto (confirmado) · 🔵 Resuelto parcialmente · 🟠 Reabierto a propósito
+> (riesgo conocido y aceptado por decisión de producto).
 
 | # | Hallazgo | Severidad | Estado |
 |---|---|---|---|
 | 9 | `sp_GetLoginByEmail` referencia tabla `Roles` inexistente (rompe login) — confirmado en vivo | 🔴 Alta | 🟢 Resuelto |
 | 13 | Usuarios aprovisionados veían/se conectaban a BDs de otros usuarios | 🔴 Alta | 🔵 Parcial (SQL Server/Postgres/Mongo 🟢, MySQL 🔴) |
-| 14 | Enumeración de cuentas OAuth-only en `POST /auth/login` (mensaje distinto sin necesitar password) | 🔴 Alta | 🟢 Resuelto |
+| 14 | Enumeración de cuentas OAuth-only en `POST /auth/login` (mensaje distinto sin necesitar password) | 🔴 Alta | 🟠 Reabierto a propósito (2026-07-29): mensajes específicos por decisión de producto; mitigado solo por rate limit `auth` |
 | 16 | BD MySQL de usuarios OAuth quedaba con contraseña imposible de entregar (huérfana) | 🔴 Alta | 🟢 Resuelto |
 | 11 | Ciclo de vida (TTL) sin implementar: no hay pausado/eliminación automática por inactividad | 🔴 Alta | 🔴 Abierto |
 | 1 | Token JWT en query string del redirect OAuth | 🔴 Alta | 🔴 Abierto |

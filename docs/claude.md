@@ -641,18 +641,54 @@ hasta que se despliegue, y setear `Frontend:BaseUrl` al dominio real ahí.
 
 ---
 
+## Sesión 13 — 2026-07-23 (OAuth auto-aprovisiona la BD MySQL y entrega las credenciales por correo)
+
+**Pedido:** el usuario preguntó si convenía que el backend disparara el
+auto-aprovisionamiento de la BD MySQL en login por OAuth o dejárselo al front.
+Se le explicó que el nudo real es el canal seguro para la contraseña de un solo
+uso (la respuesta OAuth viaja por redirect/query string). El usuario propuso
+justo la solución: **mandarla por correo**. Se implementó.
+
+**Qué se hizo:**
+
+1. **`Services/EmailTemplates.cs`**: nueva plantilla
+   `FirstDatabaseCredentials(ProvisionedDatabaseCredentials)` con host, puerto,
+   BD, usuario y contraseña (más `using idempotencia.DTOs;`).
+2. **`Services/AuthService.cs`**: se inyectó `IEmailService` (ya registrado en
+   `Program.cs`), y `ExternalLoginAsync` volvió a llamar
+   `EnsureMySqlDatabaseAsync`; si crea la BD, envía las credenciales por correo
+   con un método nuevo `SendFirstDatabaseEmailAsync` (no bloqueante: si el
+   correo falla, el login sigue, la BD existe y se puede regenerar la contraseña
+   con `POST /databases/{id}/reset-password`). La contraseña NO se pobla en el
+   `AuthResponse` (se perdería/expondría en el redirect). Esto **revierte
+   parcialmente la decisión del ítem 16**: antes se quitó el auto-aprovisionamiento
+   de OAuth; ahora se reactiva pero entregando por el canal seguro que faltaba.
+3. **Docs**: `bugs.md` ítem 16 (solución inicial vs. final), `routes.md`
+   (filas de callback + hallazgo 9), `docs/API.md` (§5.4 reescrita, ejemplo de
+   callback, §10) y esta bitácora.
+
+**Limitación:** igual que la sesión 11, no se pudo compilar/arrancar en este
+entorno (sin SDK de .NET). Cambios verificados por lectura; falta `dotnet build`
+y una prueba en vivo del correo (SMTP ya está configurado en `appsettings.json`).
+
+---
+
 ## Backlog / próximos pasos
 
 1. **Redesplegar el backend actual a QA** para que lleguen los fixes ya
    committeados que el front todavía ve fallar contra el desplegado
    (validación de email de 150 caracteres — ítem 20; callback OAuth por
-   redirect; rate limit OAuth — ítem 2) y **setear `Frontend:BaseUrl` al
+   redirect; rate limit OAuth — ítem 2; auto-aprovisionamiento OAuth + correo —
+   ítem 16, sesión 13) y **setear `Frontend:BaseUrl` al
    dominio real** (`https://idempotencia.andrescortes.dev`) en el appsettings
    del ambiente desplegado, no `localhost`.
 2. **Confirmar la compilación tras los fixes de la sesión 11**: `dotnet build`
    (ítems 2/5/7) y, para el ítem 4, `dotnet restore` +
    `dotnet list package --vulnerable` para confirmar que `NU1903` desaparece
-   con el pin de `Microsoft.OpenApi` 2.7.5 (mover el ítem 4 de 🟡 a 🟢).
+   con el pin de `Microsoft.OpenApi` 2.7.5 (mover el ítem 4 de 🟡 a 🟢). Incluye
+   también los cambios de la sesión 13 (`AuthService`/`EmailTemplates`), y hacer
+   una prueba en vivo de un primer login OAuth para confirmar que llega el correo
+   con las credenciales de la BD.
 3. **Migrar el connection string fuera de `master`** (deuda técnica, `bugs.md`
    ítem 22): cuando exista una BD dedicada con el esquema (tablas + SPs)
    desplegado, apuntar ahí `ConnectionStrings:Colmena` y el
