@@ -1,5 +1,7 @@
 using idempotencia.Interfaces;
 using idempotencia.Models;
+using idempotencia.Services;
+using Microsoft.Extensions.Options;
 using MySqlConnector;
 
 namespace idempotencia.Provisioners;
@@ -22,11 +24,16 @@ public class MySqlProvisioner : IDatabaseProvisioner
     public string Host => _host;
     public int Port => _port;
 
-    public MySqlProvisioner(IConfiguration config)
+    public MySqlProvisioner(
+        IConfiguration config, IOptions<ProvisioningSettings> provisioning)
     {
         _adminConnectionString = config["Provisioning:MySql:AdminConnectionString"]
             ?? throw new InvalidOperationException("Falta Provisioning:MySql:AdminConnectionString.");
-        _host = config["Provisioning:MySql:Host"] ?? "localhost";
+        // El host que se le entrega al usuario NO es el que usa el backend para
+        // hablar con el motor (ese va en AdminConnectionString y en despliegue es
+        // el nombre del contenedor): es la IP pública del VPS, común a los cuatro
+        // motores. Program.cs ya validó al arrancar que esté configurada.
+        _host = provisioning.Value.IpVps;
         _port = int.TryParse(config["Provisioning:MySql:Port"], out var p) ? p : 3306;
     }
 

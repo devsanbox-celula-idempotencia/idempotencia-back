@@ -36,6 +36,25 @@ builder.Services.Configure<EmailSettings>(
 builder.Services.Configure<SizeMonitorSettings>(
     builder.Configuration.GetSection(SizeMonitorSettings.SectionName));
 
+// Host público (IP del VPS o dominio) que se entrega a los usuarios para
+// conectarse a sus BDs. Es distinto del host con el que el backend habla con
+// cada motor: ese vive en Provisioning:{Engine}:AdminConnectionString y en
+// despliegue es el nombre del contenedor en la red interna de Docker, que no
+// resuelve desde afuera. Se valida acá (mismo criterio que Cors:AllowedOrigins)
+// porque un despliegue sin esta clave entrega datos de conexión inservibles SIN
+// fallar en ningún momento: el error recién aparecería en el cliente, al no
+// poder conectarse.
+builder.Services.Configure<ProvisioningSettings>(
+    builder.Configuration.GetSection(ProvisioningSettings.SectionName));
+
+if (string.IsNullOrWhiteSpace(builder.Configuration["Provisioning:IpVps"]))
+{
+    throw new InvalidOperationException(
+        "Falta configurar Provisioning:IpVps en appsettings.json: la IP pública del " +
+        "VPS (o el dominio que apunte a él) que se entrega a los usuarios para " +
+        "conectarse a sus bases de datos. En local usar \"localhost\".");
+}
+
 
 builder.Services.AddDbContext<ColmenaDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("Colmena")));
