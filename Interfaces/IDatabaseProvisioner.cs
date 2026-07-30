@@ -13,10 +13,21 @@ public interface IDatabaseProvisioner
     /// <summary>Motor que maneja esta implementación (ver <see cref="DatabaseEngine"/>).</summary>
     string Engine { get; }
 
-    /// <summary>Host de conexión de este motor (mismo para todas las BDs de este motor/ambiente).</summary>
+    /// <summary>
+    /// Host PÚBLICO que se le entrega al usuario para conectarse a sus BDs: sale
+    /// de <c>Provisioning:IpVps</c> (ver <see cref="idempotencia.Services.ProvisioningSettings"/>),
+    /// así que es el mismo para los cuatro motores y para todas las BDs del
+    /// ambiente. No es el host con el que este provisioner habla con el motor
+    /// (ese vive en su <c>AdminConnectionString</c> y en despliegue es el nombre
+    /// del contenedor, que no resuelve desde afuera).
+    /// </summary>
     string Host { get; }
 
-    /// <summary>Puerto de conexión de este motor.</summary>
+    /// <summary>
+    /// Puerto público de este motor (<c>Provisioning:{Engine}:Port</c>). A
+    /// diferencia del host, sí es por motor: los cuatro conviven en la misma
+    /// máquina y se distinguen por el puerto publicado.
+    /// </summary>
     int Port { get; }
 
     /// <summary>

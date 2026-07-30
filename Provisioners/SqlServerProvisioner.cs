@@ -1,7 +1,9 @@
 using System.Data;
 using idempotencia.Interfaces;
 using idempotencia.Models;
+using idempotencia.Services;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Options;
 
 namespace idempotencia.Provisioners;
 
@@ -21,7 +23,8 @@ public class SqlServerProvisioner : IDatabaseProvisioner
     public string Host => _host;
     public int Port => _port;
 
-    public SqlServerProvisioner(IConfiguration config)
+    public SqlServerProvisioner(
+        IConfiguration config, IOptions<ProvisioningSettings> provisioning)
     {
         // Cadena de administración dedicada; si no hay, se reusa la del catálogo
         // (misma instancia, conectado como sa). Nunca hardcodear.
@@ -31,7 +34,11 @@ public class SqlServerProvisioner : IDatabaseProvisioner
             ?? throw new InvalidOperationException(
                 "Falta la cadena de administración de SQL Server para aprovisionar.");
 
-        _host = config["Provisioning:SqlServer:Host"] ?? "localhost";
+        // El host que se le entrega al usuario NO es el que usa el backend para
+        // hablar con el motor (ese va en AdminConnectionString y en despliegue es
+        // el nombre del contenedor): es la IP pública del VPS, común a los cuatro
+        // motores. Program.cs ya validó al arrancar que esté configurada.
+        _host = provisioning.Value.IpVps;
         _port = int.TryParse(config["Provisioning:SqlServer:Port"], out var p) ? p : 1433;
     }
 

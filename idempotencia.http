@@ -20,6 +20,26 @@ Content-Type: application/json
   "password": "Segura12"
 }
 
+### Login con contrasena incorrecta — debe decir "La contrasena es incorrecta."
+# Desde 2026-07-29 cada caso tiene su propio mensaje (bugs.md item 14).
+# Si responde "Credenciales invalidas." es que el deploy no llego.
+POST {{idempotencia_HostAddress}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "ana@uni.edu",
+  "password": "ClaveMala1"
+}
+
+### Login con correo inexistente — debe decir "No existe una cuenta registrada con ese correo."
+POST {{idempotencia_HostAddress}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "nadie@uni.edu",
+  "password": "ClaveMala1"
+}
+
 ### Login OAuth (abrir en el navegador; redirige a Google/GitHub)
 GET {{idempotencia_HostAddress}}/auth/google/login
 
@@ -48,8 +68,14 @@ Authorization: Bearer {{token}}
 GET {{idempotencia_HostAddress}}/databases/1
 Authorization: Bearer {{token}}
 
-### Desactivar una BD (revoca acceso fisico; requerido antes de eliminar)
+### Desactivar una BD (revoca acceso fisico; ya es reversible con /reactivate)
 POST {{idempotencia_HostAddress}}/databases/1/deactivate
+Authorization: Bearer {{token}}
+
+### Reactivar una BD desactivada (vuelve a Active; misma contrasena, mismos datos)
+# Requiere que este Inactive. Idempotente: reintentar es seguro.
+# Respuesta esperada: status "Active" y pausedAt null.
+POST {{idempotencia_HostAddress}}/databases/1/reactivate
 Authorization: Bearer {{token}}
 
 ### Eliminar una BD (solo si ya esta Inactive)
