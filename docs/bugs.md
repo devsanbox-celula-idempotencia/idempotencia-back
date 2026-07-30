@@ -1195,6 +1195,77 @@ compilar y desplegar.
 
 ---
 
+### 27. El `host` entregado al usuario salía del host interno del motor: en despliegue devolvía el nombre del contenedor, y sin la clave caía en `localhost` en silencio — CORREGIDO
+**Estado:** 🟡 Fix implementado (pendiente configurar `Provisioning:IpVps`, compilar y desplegar).
+**Tipo:** Configuración / funcionalidad (dato inservible expuesto en la API).
+**Dónde:** los cuatro provisioners —
+[`Provisioners/PostgresProvisioner.cs`](../Provisioners/PostgresProvisioner.cs),
+[`MySqlProvisioner.cs`](../Provisioners/MySqlProvisioner.cs),
+[`SqlServerProvisioner.cs`](../Provisioners/SqlServerProvisioner.cs),
+[`MongoProvisioner.cs`](../Provisioners/MongoProvisioner.cs) — consumido desde
+[`Services/DatabaseProvisioningService.cs`](../Services/DatabaseProvisioningService.cs)
+(`CreateDatabaseResponse.Host` y `MapToDetailResponse`).
+
+**Problema:** cada provisioner leía `Provisioning:{Engine}:Host` y lo devolvía
+tal cual en el campo `host` de `POST /databases`, `GET /databases`,
+`GET /databases/{id}` y del correo de credenciales. Esa clave describía "cómo
+llega el backend al motor", que **en despliegue con Docker es el nombre del
+contenedor** (`colmena-postgres`, `colmena-mysql`, …): un nombre que solo
+resuelve dentro de la red interna de Docker. El usuario recibía credenciales
+correctas con un host al que no puede conectarse desde su máquina.
+
+Dos agravantes:
+
+- **Fallback silencioso:** `?? "localhost"`. Si la clave no estaba, la API
+  reportaba `localhost` sin warning ni error de arranque — el fallo aparecía
+  recién en el cliente del usuario, como un timeout de conexión sin
+  explicación. Contrastaba con `AdminConnectionString`, que sí lanza si falta.
+- **Dos conceptos en una sola clave:** la dirección interna (backend → motor) y
+  la pública (usuario → motor) no tienen por qué coincidir, y en despliegue
+  nunca coinciden.
+
+**Solución aplicada** (decisión de esta sesión): separar los dos conceptos.
+
+- Nueva clave global `Provisioning:IpVps` — la IP pública del VPS (o el dominio
+  que apunte a él), enlazada en
+  [`Services/ProvisioningSettings.cs`](../Services/ProvisioningSettings.cs). Es
+  **una sola** para los cuatro motores porque todos corren en la misma máquina;
+  lo que sigue siendo por motor es `Provisioning:{Engine}:Port`, el puerto
+  publicado.
+- `Provisioning:{Engine}:Host` **deja de leerse** (se puede borrar del
+  `appsettings.json`). El host interno sigue viviendo donde corresponde: dentro
+  de cada `AdminConnectionString`.
+- Los provisioners reciben `IOptions<ProvisioningSettings>` y exponen
+  `Host => IpVps`.
+- [`Program.cs`](../Program.cs) **valida al arrancar** que `Provisioning:IpVps`
+  esté configurada y lanza `InvalidOperationException` con un mensaje explícito
+  si falta — mismo criterio que `Cors:AllowedOrigins`. Se eligió fallar de una
+  en vez de warning + `localhost`: un despliegue mal configurado que arranca
+  "bien" y entrega datos inservibles es exactamente el modo de falla que este
+  ítem describe.
+
+**Efecto secundario a tener en cuenta:** el host nunca se persistió en el
+catálogo (`ProvisionedDatabaseDetail` no lo tiene; `MapToDetailResponse` lo toma
+del provisioner en cada consulta). Cambiar `Provisioning:IpVps` cambia entonces
+retroactivamente el host reportado de **todas** las BDs ya creadas — deseable si
+el VPS cambia de IP, pero implica que el valor histórico no queda registrado en
+ninguna parte.
+
+**Aplicado en configuración (2026-07-30):** el `appsettings.json` local ya tiene
+`Provisioning:IpVps: "100.99.206.50"` y **se borraron las cuatro claves
+`Provisioning:{Engine}:Host`**, que contenían exactamente los nombres de
+contenedor que describe este ítem (`idempotencia-sqlserver`,
+`idempotencia-postgres`, `idempotencia-mysql`, `idempotencia-mongodb`). Los
+`AdminConnectionString` siguen usando esos nombres, que es su lugar correcto.
+
+**Pendiente:** compilar, desplegar, y confirmar en el ambiente desplegado que la
+IP configurada sea alcanzable **desde la máquina del usuario** — `100.99.206.50`
+está en el rango CGNAT (100.64.0.0/10, típico de Tailscale): sirve si los
+usuarios entran por esa misma red privada, no desde internet abierta. Si el
+acceso es público, ahí va la IP pública del VPS o un dominio.
+
+---
+
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
@@ -1230,3 +1301,4 @@ compilar y desplegar.
 | 24 | `POST /databases/{id}/deactivate` siempre falla: `sp_DeactivateDatabase` escribe `'Inactive'` y `CK_ProvDb_Status` solo permite `'Paused'` (error 547) | 🔴 Alta (funcionalidad rota + catálogo desincronizado) | 🔴 Abierto (fix es un `ALTER TABLE`, ver ítem 24) |
 | 25 | `currentSizeMB` nunca se actualizaba: ningún SP lo escribía y no había job que midiera | 🟠 Media (dato falso expuesto en la API, en los 4 motores) | 🟡 Fix implementado (`DatabaseSizeMonitor` + 2 SPs); falta ejecutar el script SQL, compilar y desplegar |
 | 26 | Desactivar era un camino sin retorno: faltaba `POST /databases/{id}/reactivate` pese a que los datos nunca se borran | 🟠 Media (pérdida de acceso evitable por un clic del usuario) | 🟡 Implementado (`sp_ReactivateDatabase` + endpoint); falta ejecutar el script SQL, compilar y desplegar |
+| 27 | El `host` entregado al usuario salía de `Provisioning:{Engine}:Host` (en Docker, el nombre del contenedor) y caía a `localhost` en silencio si faltaba | 🔴 Alta (credenciales inservibles desde fuera del servidor, sin señal de error) | 🟡 Implementado (`Provisioning:IpVps` + validación al arrancar); falta setear la clave por ambiente, compilar y desplegar |

@@ -767,6 +767,77 @@ tocarla para que el job corra: todos los valores tienen default.
 
 ---
 
+## Sesión 15 — 2026-07-30 (el `host` que se entrega al usuario deja de ser el host interno del motor)
+
+**Pedido:** "¿de dónde se saca el host?" y, al ver que salía de
+`Provisioning:{Engine}:Host` —que en despliegue termina con el nombre del
+contenedor—, cambiarlo por un host estático configurable: una clave en
+`appsettings.json` con la IP del VPS que se entregue como host de conexión.
+
+**Qué se hizo:**
+
+1. **Ítem 27 (nuevo) — separación entre host interno y host público.** El campo
+   `host` de la API salía de `Provisioning:{Engine}:Host`, una clave que
+   describía cómo llega el *backend* al motor: en Docker, el nombre del
+   contenedor, que no resuelve desde la máquina del usuario. Y si la clave
+   faltaba, caía a `localhost` en silencio. Se agregó
+   [`Services/ProvisioningSettings.cs`](../Services/ProvisioningSettings.cs) con
+   la clave global **`Provisioning:IpVps`** (IP pública del VPS o su dominio),
+   los cuatro provisioners pasaron a recibir `IOptions<ProvisioningSettings>` y
+   exponen `Host => IpVps`, y `Provisioning:{Engine}:Host` dejó de leerse. El
+   host interno sigue viviendo dentro de cada `AdminConnectionString`, que es su
+   lugar. Detalle completo en el ítem 27 de `bugs.md`.
+
+2. **Decisiones tomadas explícitamente en esta sesión** (se ofrecieron
+   alternativas y se eligió):
+   - **Una clave global, no una por motor:** los cuatro motores corren en la
+     misma máquina, así que repetir la IP cuatro veces solo agrega superficie
+     para desincronizarse. Lo que sigue siendo por motor es el `Port`.
+   - **Nombre `IpVps`** (sobre `PublicHost`): describe lo que es hoy. Si algún
+     día pasa a ser un dominio, el valor sigue funcionando —
+     `ProvisioningSettings` documenta que acepta ambos— y el rename queda como
+     deuda cosmética.
+   - **Error al arrancar si falta**, no warning + `localhost`: mismo criterio
+     que `Cors:AllowedOrigins`. Un despliegue que arranca "bien" y entrega
+     datos de conexión inservibles es justamente el modo de falla del ítem 27.
+
+3. **Efecto secundario documentado:** el host no se persiste en el catálogo (se
+   resuelve desde el provisioner en cada consulta), así que cambiar
+   `Provisioning:IpVps` reescribe retroactivamente el host reportado de todas
+   las BDs ya creadas. Es lo que se quiere si el VPS cambia de IP, pero conviene
+   saberlo.
+
+4. **Documentación actualizada:** ítem 27 + fila en el resumen de `bugs.md`,
+   tabla de secciones de configuración y checklist de QA/producción en
+   [`docusaurus-docs/06-configuracion-ambientes.md`](../docusaurus-docs/06-configuracion-ambientes.md),
+   y el XML-doc de `Host`/`Port` en
+   [`Interfaces/IDatabaseProvisioner.cs`](../Interfaces/IDatabaseProvisioner.cs).
+   `routes.md` y `API.md` **no cambian**: no se tocó ninguna ruta ni el contrato
+   de respuesta (el campo `host` sigue siendo el mismo campo, con el valor que
+   siempre debió tener).
+
+5. **`appsettings.json` reorganizado** (no versionado, así que queda constancia
+   acá): se agregó `Provisioning:IpVps` con la IP del servidor
+   (`100.99.206.50`, la misma que ya usaban `Frontend:BaseUrl`/`Cors` y los
+   ejemplos de `API.md`), se **borraron las cuatro claves
+   `Provisioning:{Engine}:Host`** —que tenían los nombres de contenedor
+   `idempotencia-sqlserver`/`-postgres`/`-mysql`/`-mongodb`, la causa exacta del
+   ítem 27—, se hizo explícito el bloque `Provisioning:SizeMonitor` con los
+   mismos valores que sus defaults en código, y se reagruparon las secciones
+   (frontend/CORS → auth → correo → datos). Ningún valor existente cambió; se
+   verificó clave por clave. Los `AdminConnectionString` siguen apuntando a los
+   nombres de contenedor, que es lo correcto: son la ruta interna.
+
+**Pendiente al cierre:** `dotnet build` (no hubo SDK de .NET disponible en el
+entorno de esta sesión; los cambios están verificados por lectura y diff) y
+desplegar. En el ambiente desplegado hay que confirmar que `Provisioning:IpVps`
+sea una dirección alcanzable **desde la máquina del usuario**: `100.99.206.50`
+está en el rango CGNAT (100.64.0.0/10), típico de Tailscale, así que sirve si
+los usuarios entran por la misma red privada, pero no desde internet abierta —
+ahí tendría que ser la IP pública o un dominio.
+
+---
+
 ## Backlog / próximos pasos
 
 1. **Redesplegar el backend actual a QA** para que lleguen los fixes ya
@@ -775,12 +846,18 @@ tocarla para que el job corra: todos los valores tienen default.
    redirect; rate limit OAuth — ítem 2; auto-aprovisionamiento OAuth + correo —
    ítem 16, sesión 13) y **setear `Frontend:BaseUrl` al
    dominio real** (`https://idempotencia.andrescortes.dev`) en el appsettings
-   del ambiente desplegado, no `localhost`.
+   del ambiente desplegado, no `localhost`. En el mismo paso, **setear
+   `Provisioning:IpVps`** a la IP pública del VPS (ítem 27, sesión 15): sin esa
+   clave el backend ya no arranca, y con ella mal puesta el usuario recibe un
+   host al que no puede conectarse. Revisar también que
+   `Provisioning:{Engine}:Port` sean los puertos publicados hacia afuera, no los
+   internos del contenedor.
 2. **Confirmar la compilación tras los fixes de la sesión 11**: `dotnet build`
    (ítems 2/5/7) y, para el ítem 4, `dotnet restore` +
    `dotnet list package --vulnerable` para confirmar que `NU1903` desaparece
    con el pin de `Microsoft.OpenApi` 2.7.5 (mover el ítem 4 de 🟡 a 🟢). Incluye
-   también los cambios de la sesión 13 (`AuthService`/`EmailTemplates`), y hacer
+   también los cambios de la sesión 13 (`AuthService`/`EmailTemplates`) y los de
+   la sesión 15 (`ProvisioningSettings` + los cuatro provisioners), y hacer
    una prueba en vivo de un primer login OAuth para confirmar que llega el correo
    con las credenciales de la BD.
 3. **Migrar el connection string fuera de `master`** (deuda técnica, `bugs.md`

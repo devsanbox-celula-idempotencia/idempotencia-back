@@ -34,7 +34,8 @@ se documentan aquí por ese mismo motivo.
 | `Jwt:Issuer` / `Jwt:Audience` / `Jwt:Key` / `Jwt:ExpirationMinutes` | Configuración de emisión y validación del JWT propio |
 | `Authentication:Google:ClientId` / `ClientSecret` | Credenciales de la app OAuth de Google |
 | `Authentication:GitHub:ClientId` / `ClientSecret` | Credenciales de la app OAuth de GitHub |
-| `Provisioning:{Engine}:Host` / `Port` / `AdminConnectionString` | Datos de conexión con privilegios de administrador para cada motor aprovisionable |
+| `Provisioning:IpVps` | **Host público** (IP del VPS, o el dominio que apunte a él) que se entrega a los usuarios en el campo `host` para conectarse a sus BDs. Un único valor para los cuatro motores. El backend **lanza un error al arrancar** si falta, en vez de reportar `localhost` en silencio |
+| `Provisioning:{Engine}:Port` / `AdminConnectionString` | Puerto público de cada motor y cadena de conexión con privilegios de administrador que usa el backend para aprovisionar. `AdminConnectionString` es la ruta **interna** al motor (en Docker, el nombre del contenedor) y por eso no sirve como `host` del usuario — para eso está `Provisioning:IpVps` |
 | `Provisioning:{Engine}:MaxConcurrentConnections` / `MaxConcurrentConnectionsCap` | Default y tope duro de conexiones concurrentes por BD aprovisionada (MySQL/Postgres) |
 
 ## Ambientes
@@ -61,9 +62,15 @@ propio, la práctica recomendada es:
    variables de entorno equivalentes), **sin** commitear secretos reales.
 2. Ajustar `Cors:AllowedOrigins` y `Frontend:BaseUrl` al dominio real del
    frontend de ese ambiente.
-3. Configurar el redirect URI de OAuth para el dominio de ese ambiente en
+3. Setear `Provisioning:IpVps` a la **IP pública del servidor de bases de
+   datos** (o su dominio) y `Provisioning:{Engine}:Port` a los puertos
+   publicados hacia afuera. En local se usa `"localhost"`. Es lo único que ve
+   el usuario final para conectarse: si queda apuntando al nombre de un
+   contenedor o a `localhost`, las credenciales entregadas no sirven desde
+   fuera del servidor. El backend no arranca si esta clave falta.
+4. Configurar el redirect URI de OAuth para el dominio de ese ambiente en
    Google Cloud Console / GitHub OAuth Apps (ver siguiente sección).
-4. Si el despliegue va detrás de un reverse proxy, habilitar
+5. Si el despliegue va detrás de un reverse proxy, habilitar
    `ForwardedHeaders` (`X-Forwarded-For`) — de lo contrario el rate limiting
    (particionado por IP) colapsa porque todas las peticiones comparten la IP
    del proxy.

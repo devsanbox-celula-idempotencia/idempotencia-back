@@ -1,5 +1,7 @@
 using idempotencia.Interfaces;
 using idempotencia.Models;
+using idempotencia.Services;
+using Microsoft.Extensions.Options;
 using Npgsql;
 
 namespace idempotencia.Provisioners;
@@ -21,11 +23,16 @@ public class PostgresProvisioner : IDatabaseProvisioner
     public string Host => _host;
     public int Port => _port;
 
-    public PostgresProvisioner(IConfiguration config)
+    public PostgresProvisioner(
+        IConfiguration config, IOptions<ProvisioningSettings> provisioning)
     {
         _adminConnectionString = config["Provisioning:Postgres:AdminConnectionString"]
             ?? throw new InvalidOperationException("Falta Provisioning:Postgres:AdminConnectionString.");
-        _host = config["Provisioning:Postgres:Host"] ?? "localhost";
+        // El host que se le entrega al usuario NO es el que usa el backend para
+        // hablar con el motor (ese va en AdminConnectionString y en despliegue es
+        // el nombre del contenedor): es la IP pública del VPS, común a los cuatro
+        // motores. Program.cs ya validó al arrancar que esté configurada.
+        _host = provisioning.Value.IpVps;
         _port = int.TryParse(config["Provisioning:Postgres:Port"], out var p) ? p : 5432;
     }
 
