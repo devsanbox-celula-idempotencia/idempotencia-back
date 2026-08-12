@@ -17,6 +17,7 @@ public class MongoProvisioner : IDatabaseProvisioner
     private readonly string _adminConnectionString;
     private readonly string _host;
     private readonly int _port;
+    private readonly bool _requireTls;
 
     public string Engine => DatabaseEngine.Mongo;
     public string Host => _host;
@@ -33,6 +34,32 @@ public class MongoProvisioner : IDatabaseProvisioner
         // motores. Program.cs ya validó al arrancar que esté configurada.
         _host = provisioning.Value.IpVps;
         _port = int.TryParse(config["Provisioning:Mongo:Port"], out var p) ? p : 27017;
+
+        // Ver la nota de RequireTls en MySqlProvisioner. En Mongo arranca
+        // apagado por la misma razón que en Postgres: la imagen oficial no trae
+        // TLS habilitado y tls=true contra un servidor sin certificado corta la
+        // conexión del usuario.
+        _requireTls = bool.TryParse(config["Provisioning:Mongo:RequireTls"], out var tls) && tls;
+    }
+
+    /// <inheritdoc />
+    public ClientConnectionInfo BuildClientConnection(string dbName, string login, string password)
+    {
+        // authSource es obligatorio, no un extra: el usuario se crea DENTRO de
+        // su propia BD (no en 'admin'), así que sin este parámetro el cliente
+        // intenta autenticarse contra 'admin' y falla con "Authentication
+        // failed" — un error que parece de credenciales y no lo es.
+        //
+        // tlsInsecure acompaña a tls=true porque el certificado es autofirmado:
+        // sin él, el driver corta por validación de la cadena de confianza.
+        var tls = _requireTls ? "&tls=true&tlsInsecure=true" : string.Empty;
+
+        // Mongo no tiene un driver JDBC estándar (los clientes usan el driver
+        // nativo o mongosh), así que solo se entrega la URI.
+        return new ClientConnectionInfo(
+            $"mongodb://{Uri.EscapeDataString(login)}:{Uri.EscapeDataString(password)}" +
+            $"@{_host}:{_port}/{dbName}?authSource={Uri.EscapeDataString(dbName)}{tls}",
+            null);
     }
 
     public async Task<ProvisionResult> CreateAsync(

@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using System.Text;
 using System.Threading.RateLimiting;
 using idempotencia.Data;
@@ -12,6 +13,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Scalar.AspNetCore;
 
@@ -55,6 +57,30 @@ if (string.IsNullOrWhiteSpace(builder.Configuration["Provisioning:IpVps"]))
         "conectarse a sus bases de datos. En local usar \"localhost\".");
 }
 
+// ---------------------------------------------------------------------------
+// DNS (Cloudflare). Mismo criterio de validación al arrancar que Provisioning:
+// IpVps y Cors:AllowedOrigins — sin estas claves el servicio de subdominios no
+// puede funcionar, y el error no aparecería hasta el primer POST /dns de un
+// usuario real. Es preferible que el proceso no levante.
+//
+// El token es un SECRETO: en despliegue debe venir por variable de entorno
+// (Dns__ApiToken) o user-secrets, no del appsettings.json versionado.
+// ---------------------------------------------------------------------------
+builder.Services.Configure<DnsSettings>(
+    builder.Configuration.GetSection(DnsSettings.SectionName));
+
+foreach (var requiredDnsKey in new[] { "Dns:ZoneId", "Dns:ApiToken", "Dns:ZoneName" })
+{
+    if (string.IsNullOrWhiteSpace(builder.Configuration[requiredDnsKey]))
+    {
+        throw new InvalidOperationException(
+            $"Falta configurar {requiredDnsKey}. La sección Dns necesita el ZoneId de la " +
+            "zona en Cloudflare, un token de API con permiso Zone.DNS:Edit sobre esa zona, " +
+            "y el nombre del dominio (por ejemplo \"coderhivex.com\"). En despliegue, " +
+            "pasar el token por la variable de entorno Dns__ApiToken.");
+    }
+}
+
 
 builder.Services.AddDbContext<ColmenaDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("Colmena")));
@@ -67,6 +93,38 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 builder.Services.AddSingleton<IOAuthRedirectBuilder, OAuthRedirectBuilder>();
 builder.Services.AddScoped<IEmailService, SmtpEmailService>();
+builder.Services.AddScoped<IDnsRepository, DnsRepository>();
+builder.Services.AddScoped<IDnsProvisioningService, DnsProvisioningService>();
+
+// Proveedor de DNS como HttpClient tipado: el handler subyacente se comparte y
+// se recicla solo, lo que evita a la vez el agotamiento de sockets (un
+// HttpClient nuevo por request) y el handler eterno que no se entera de un
+// cambio de DNS del proveedor. Las cabeceras de autenticación se configuran acá,
+// una sola vez, en vez de en cada llamada.
+//
+// A diferencia de los provisioners de bases de datos NO hay factory: los motores
+// son cuatro y conviven (el usuario elige uno por BD), mientras que el proveedor
+// de DNS es uno solo por despliegue. La interfaz sí existe para que agregar
+// Route53 mañana no obligue a tocar el servicio orquestador.
+builder.Services.AddHttpClient<IDnsProvider, CloudflareDnsProvider>((sp, client) =>
+{
+    var dns = sp.GetRequiredService<IOptions<DnsSettings>>().Value;
+
+    // BaseAddress DEBE terminar en "/": si no, Uri descarta el último segmento
+    // al combinar con la ruta relativa y todas las llamadas irían a /client/.
+    var baseUrl = dns.ApiBaseUrl.EndsWith('/') ? dns.ApiBaseUrl : dns.ApiBaseUrl + "/";
+
+    client.BaseAddress = new Uri(baseUrl);
+    client.DefaultRequestHeaders.Authorization =
+        new AuthenticationHeaderValue("Bearer", dns.ApiToken);
+    client.DefaultRequestHeaders.Accept.Add(
+        new MediaTypeWithQualityHeaderValue("application/json"));
+
+    // Timeout corto: es una dependencia externa dentro del ciclo de un request
+    // del usuario. Fallar rápido y revertir la reserva es mejor que dejar la
+    // petición colgada hasta el timeout por defecto de 100 segundos.
+    client.Timeout = TimeSpan.FromSeconds(dns.RequestTimeoutSeconds);
+});
 
 // Aprovisionamiento multi-motor: servicio orquestador + factory + un provisioner
 // por motor (patrón Strategy). Se registran todos como IDatabaseProvisioner y el
@@ -192,6 +250,7 @@ builder.Services.AddCors(options =>
 const string AuthRateLimitPolicy = "auth";
 const string OAuthRateLimitPolicy = "oauth";
 const string DbProvisioningRateLimitPolicy = "db-provisioning";
+const string DnsRateLimitPolicy = "dns";
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -236,6 +295,25 @@ builder.Services.AddRateLimiter(options =>
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = 5,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+
+    // Política para las escrituras de /dns. Cada POST/PUT/DELETE dispara una
+    // llamada a una API externa con cuota propia (Cloudflare limita a 1200
+    // requests cada 5 minutos por cuenta, compartida por TODA la plataforma), así
+    // que el abuso relevante no es "este usuario se hace daño a sí mismo" sino
+    // "este usuario agota la cuota de todos". Se particiona por UserId igual que
+    // db-provisioning —el endpoint ya exige autenticación— y se deja en 10/min,
+    // el doble que el aprovisionamiento de BDs porque una operación de DNS es
+    // mucho más barata y es normal crear varios subdominios seguidos.
+    options.AddPolicy(DnsRateLimitPolicy, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.User.FindFirst(JwtClaimNames.UserId)?.Value
+                ?? httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0
             }));

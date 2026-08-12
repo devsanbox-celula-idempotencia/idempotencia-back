@@ -91,3 +91,86 @@ GET {{idempotencia_HostAddress}}/statistics
 Authorization: Bearer {{token}}
 
 ###
+
+### ---------------------------------------------------------------------------
+### DNS — autoservicio de subdominios {label}.idempotencia.coderhivex.com
+### ---------------------------------------------------------------------------
+
+### Zona y patrón (para la vista previa del frontend)
+GET {{idempotencia_HostAddress}}/dns/zone
+Authorization: Bearer {{token}}
+
+### Crear un subdominio  ->  airflow.idempotencia.coderhivex.com
+POST {{idempotencia_HostAddress}}/dns
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "label": "airflow",
+  "ipAddress": "203.0.113.10"
+}
+
+### Rechazado: IP privada (400). El registro va proxeado y Cloudflare no la alcanza.
+POST {{idempotencia_HostAddress}}/dns
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "label": "interno",
+  "ipAddress": "192.168.1.10"
+}
+
+### Listar mis subdominios
+GET {{idempotencia_HostAddress}}/dns
+Authorization: Bearer {{token}}
+
+### Detalle
+GET {{idempotencia_HostAddress}}/dns/1
+Authorization: Bearer {{token}}
+
+### Reapuntar a otra IP (el nombre no se puede cambiar)
+PUT {{idempotencia_HostAddress}}/dns/1
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "ipAddress": "203.0.113.99"
+}
+
+### Eliminar (no requiere desactivar antes, a diferencia de /databases)
+DELETE {{idempotencia_HostAddress}}/dns/1
+Authorization: Bearer {{token}}
+
+
+### ---------------------------------------------------------------------------
+### Administración de DNS — requieren un JWT con rol Admin
+### ---------------------------------------------------------------------------
+
+### Inventario completo (solo los vivos)
+GET {{idempotencia_HostAddress}}/admin/dns
+Authorization: Bearer {{token}}
+
+### Qué tiene levantado una célula
+GET {{idempotencia_HostAddress}}/admin/dns?cell=idempotencia
+Authorization: Bearer {{token}}
+
+### Candidatos a revocar por inactividad
+GET {{idempotencia_HostAddress}}/admin/dns?minDaysSinceUpdate=90
+Authorization: Bearer {{token}}
+
+### Histórico de revocados
+GET {{idempotencia_HostAddress}}/admin/dns?status=Revoked
+Authorization: Bearer {{token}}
+
+### Detalle sin filtro de propiedad (incluye Deleted/Revoked)
+GET {{idempotencia_HostAddress}}/admin/dns/1
+Authorization: Bearer {{token}}
+
+### Revocar (motivo obligatorio, mínimo 10 caracteres)
+POST {{idempotencia_HostAddress}}/admin/dns/1/revoke
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "reason": "Inactivo por más de 90 días; se avisó al equipo el 2026-08-01."
+}

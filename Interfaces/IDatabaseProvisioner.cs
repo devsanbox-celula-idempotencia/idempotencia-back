@@ -31,6 +31,23 @@ public interface IDatabaseProvisioner
     int Port { get; }
 
     /// <summary>
+    /// Arma las cadenas de conexión que se le entregan al usuario final (en la
+    /// respuesta de creación y en el correo de credenciales), con el parámetro
+    /// de TLS propio de cada motor ya incluido cuando
+    /// <c>Provisioning:{Engine}:RequireTls</c> está en <c>true</c>. La sintaxis
+    /// de ese parámetro cambia por motor y por driver
+    /// (<c>ssl-mode=REQUIRED</c> / <c>sslMode=REQUIRED</c> / <c>sslmode=require</c> /
+    /// <c>tls=true</c> / <c>Encrypt=True</c>), que es justo lo que no se le
+    /// puede pedir al usuario que adivine — ver
+    /// <see cref="Models.ClientConnectionInfo"/> y docs/bugs.md ítem 28.
+    ///
+    /// No abre ninguna conexión: es construcción de strings, así que se puede
+    /// llamar también para una BD ya existente (por ejemplo al resetear la
+    /// contraseña, con la contraseña nueva).
+    /// </summary>
+    ClientConnectionInfo BuildClientConnection(string dbName, string login, string password);
+
+    /// <summary>
     /// Crea físicamente la BD + usuario con permisos en el motor.
     /// <paramref name="maxConcurrentConnections"/> ya viene resuelto (default
     /// aplicado si el cliente no pidió uno, acotado al cap del motor) —

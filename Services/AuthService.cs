@@ -205,7 +205,9 @@ public class AuthService : IAuthService
                 Host = result.Host,
                 Port = result.Port,
                 LoginName = result.LoginName,
-                Password = result.Password
+                Password = result.Password,
+                ConnectionUri = result.ConnectionUri,
+                JdbcUrl = result.JdbcUrl
             };
         }
         catch (Exception ex)
