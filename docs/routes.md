@@ -6,6 +6,15 @@
 > sin cambios de rutas ni de atributos de auth/rate-limit respecto al estado
 > de la sesión 11; los 13 endpoints y sus metadatos coinciden exactamente con
 > `Controllers/`).
+> Revisión posterior: **2026-07-30** (sesiones 15 y 16 — tampoco cambian rutas,
+> métodos, auth ni rate limits. Sí cambió el *contenido* de las respuestas de
+> `POST /databases` y del login: campos nuevos `connectionUri`/`jdbcUrl` y un
+> valor distinto en `host`; eso está documentado en `docs/API.md` y en
+> `docs/cambios-api-frontend-2026-07-30.md`, que es donde vive el contrato de
+> payloads).
+> Revisión posterior: **2026-08-12** — se agregaron `DnsController` (6 rutas
+> bajo `/dns`) y `AdminDnsController` (3 rutas bajo `/admin/dns`, rol `Admin`),
+> más una política de rate limiting nueva (`dns`). Ver hallazgo 13.
 > **Este documento debe actualizarse cada vez que cambien las rutas** (ver nota
 > al final y `CLAUDE.md`).
 
@@ -44,6 +53,15 @@
 | DELETE | `/databases/{id}` | JWT Bearer | `db-provisioning` (5/min/usuario) | 🆕 Código completo; depende de `sp_DeleteDatabase` (nuevo, sin desplegar) | Borrado físico real (irreversible) — solo permitido si la BD ya está `Inactive`; si no, `400`. |
 | POST | `/databases/{id}/reset-password` | JWT Bearer | `db-provisioning` (5/min/usuario) | 🆕 Código completo; depende de `sp_ResetDatabasePassword` (nuevo, sin desplegar) + SMTP configurado | Genera una contraseña nueva, la aplica en el motor y la envía por correo al usuario — la respuesta HTTP nunca incluye la contraseña. Requiere que la BD esté `Active`. |
 | GET | `/statistics` | JWT Bearer + rol `Admin` | Solo global | ⚠️ Código completo; depende de `sp_GetPlatformStatistics` | Requiere token con rol `Admin` (401 sin token/expirado, 403 sin rol). No verificado contra la BD real (ver nota de conectividad). |
+| POST | `/dns` | JWT Bearer | **`dns` (10/min/usuario)** | 🆕 Código completo; depende de `sp_ReserveDnsRecord` / `sp_ConfirmDnsRecord` / `sp_FailDnsRecord` (nuevos, en `sql/2026-08-12-dns-records.sql`, sin desplegar) + la sección `Dns` de configuración + **ACM/Total TLS contratado en la zona** | Autoservicio: crea `{label}.idempotencia.coderhivex.com` como registro **A proxeado** hacia la IPv4 pública que aporta el usuario. El body es `{ label, ipAddress }`; `cell` es opcional y cae a `Dns:DefaultCell` (`idempotencia`). `409` si el nombre ya está tomado; `400` si el nombre/célula son inválidos o reservados, si la IP no es pública, o si se superó la cuota (5 por usuario). |
+| GET | `/dns` | JWT Bearer | Solo global | 🆕 Código completo; depende de `sp_GetUserDnsRecords` (nuevo, sin desplegar) | Lista los subdominios vivos del usuario autenticado. |
+| GET | `/dns/{id}` | JWT Bearer | Solo global | 🆕 Código completo; depende de `sp_GetDnsRecordDetail` (nuevo, sin desplegar) | Detalle de un subdominio. 404 si no existe o no es del usuario (mismo mensaje para ambos, evita enumeración). |
+| PUT | `/dns/{id}` | JWT Bearer | `dns` (10/min/usuario) | 🆕 Código completo; depende de `sp_UpdateDnsRecord` (nuevo, sin desplegar) | Reapunta el subdominio a otra IPv4 pública. El nombre no se puede cambiar. **No** acepta `proxied` ni `ttl`: los fija la plataforma porque de ellos depende el certificado. Requiere estado `Active`. |
+| DELETE | `/dns/{id}` | JWT Bearer | `dns` (10/min/usuario) | 🆕 Código completo; depende de `sp_DeleteDnsRecord` (nuevo, sin desplegar) | Elimina el registro en Cloudflare y lo marca `Deleted` en el catálogo, liberando el nombre. **No** exige desactivar primero (a diferencia de las BDs): no se destruye ningún dato. |
+| GET | `/dns/zone` | JWT Bearer | Solo global | 🆕 Código completo; sin dependencias de BD | Devuelve `{ zoneName, pattern }` para que el frontend arme la vista previa del nombre completo sin hardcodear el dominio. |
+| GET | `/admin/dns` | JWT Bearer + rol `Admin` | Solo global | 🆕 Código completo; depende de `sp_GetAllDnsRecords` (nuevo, sin desplegar) | **Auditoría**: inventario de TODOS los registros de TODOS los usuarios, con el correo del dueño. Filtros `?cell=`, `?userId=`, `?status=`, `?minDaysSinceUpdate=` (este último sostiene la revocación por inactividad). Sin `status` devuelve solo los vivos. |
+| GET | `/admin/dns/{id}` | JWT Bearer + rol `Admin` | Solo global | 🆕 Código completo; depende de `sp_GetDnsRecordDetailAdmin` (nuevo, sin desplegar) | Detalle sin filtro de propiedad; incluye los estados terminales (`Deleted`/`Revoked`). |
+| POST | `/admin/dns/{id}/revoke` | JWT Bearer + rol `Admin` | `dns` (10/min/usuario) | 🆕 Código completo; depende de `sp_RevokeDnsRecord` (nuevo, sin desplegar) | **Revocación**: elimina el registro en Cloudflare y lo marca `Revoked` con quién/cuándo/por qué. Motivo obligatorio (mín. 10 caracteres) en el body — por eso es POST y no DELETE. |
 
 ## Rutas de infraestructura (no de negocio)
 
@@ -53,12 +71,16 @@
 | `/swagger` | Solo Development | ✅ Swagger UI. |
 | `/scalar` (Scalar API reference) | Solo Development | ✅ Mapeado vía `MapScalarApiReference()`. |
 
-## Total de endpoints de negocio: 13
+## Total de endpoints de negocio: 22
 
 - 6 en `AuthController` (`/auth/...`)
 - 6 en `DatabasesController` (`/databases...`) — incluye los 4 nuevos de
   detalle/desactivar/eliminar/reset de contraseña (sesión 7, ver `claude.md`)
 - 1 en `StatisticsController` (`/statistics`)
+- 6 en `DnsController` (`/dns...`) — autoservicio de subdominios sobre Cloudflare
+  (2026-08-12, ver hallazgo 13)
+- 3 en `AdminDnsController` (`/admin/dns...`) — auditoría y revocación, rol
+  `Admin` (2026-08-12, ver hallazgo 13)
 
 ## Hallazgos relevantes para esta tabla
 
@@ -148,6 +170,53 @@
     `[EnableRateLimiting("oauth")]` en los login/callback de Google y GitHub de
     [`Controllers/AuthController.cs`](../Controllers/AuthController.cs). Se
     reflejó en la columna "Rate limit" de la tabla de arriba.
+
+13. **Autoservicio de subdominios DNS** (`DnsController` + `AdminDnsController`,
+    2026-08-12, a pedido del usuario): los usuarios crean subdominios propios
+    para sus proyectos bajo `{label}.idempotencia.coderhivex.com` — p. ej.
+    `airflow.idempotencia.coderhivex.com` — como registros **A proxeados** hacia la IPv4
+    pública de su servicio, vía la API v4 de Cloudflare.
+
+    Sigue el mismo patrón que el aprovisionamiento de bases de datos: controller
+    → `IDnsProvisioningService` → (`IDnsRepository` para el catálogo +
+    `IDnsProvider` para el sistema externo), con el flujo reservar → crear →
+    confirmar / revertir. Diferencias deliberadas respecto de las BDs:
+
+    - **No hay factory de proveedores.** Los motores de BD son cuatro y conviven
+      (el usuario elige uno por base); el proveedor de DNS es uno solo por
+      despliegue. La interfaz `IDnsProvider` sí existe para que agregar Route53
+      no obligue a tocar el orquestador.
+    - **Borrar no exige desactivar primero.** En una BD ese paso protege datos
+      del usuario; acá no hay datos que proteger y el mismo nombre se puede
+      volver a pedir.
+    - **Rate limit `dns`** (10/min por usuario). El abuso relevante no es "este
+      usuario se hace daño a sí mismo" sino que agote la cuota de la API de
+      Cloudflare, **compartida por toda la plataforma**.
+    - **La administración vive en un controller aparte**, no como rutas extra con
+      `[Authorize(Roles)]` encima. Así la autorización queda declarada una vez a
+      nivel de clase (no se puede agregar un endpoint y olvidar el atributo) y el
+      contrato queda separado: las respuestas de admin incluyen a qué usuario
+      pertenece cada registro, dato que en el controller del usuario no aparece
+      nunca.
+
+    **Dependencia que no es código:** el HTTPS exige **Advanced Certificate
+    Manager con Total TLS activado** en la zona. El comodín gratuito de Universal
+    SSL cubre `*.coderhivex.com` — un solo nivel — y estos nombres tienen dos;
+    sin ACM los subdominios resuelven pero dan error de certificado. De ahí que
+    `proxied` no sea configurable por el usuario: Total TLS solo emite
+    certificados para hostnames proxeados.
+
+    Depende de 10 SPs nuevos (`sql/2026-08-12-dns-records.sql`) y de la sección
+    `Dns` de configuración, **ninguno desplegado todavía**. Cambios de base de
+    datos en [`docs/cambios-db-dns-2026-08-12.md`](cambios-db-dns-2026-08-12.md);
+    flujo de usuario y procedimiento de revocación en
+    `docusaurus-docs/08-dns-subdominios.md`. `Program.cs` valida
+    `Dns:ZoneId`/`ApiToken`/`ZoneName` al arrancar y no levanta si falta alguna.
+
+    **Deuda conocida:** la célula no valida pertenencia (no existe catálogo de
+    células en la base), así que cualquier usuario autenticado puede crear bajo
+    el nombre de cualquier célula. El control mientras tanto es a posteriori, con
+    `/admin/dns`.
 
 ## Mantenimiento de este documento
 

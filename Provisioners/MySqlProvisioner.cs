@@ -19,6 +19,7 @@ public class MySqlProvisioner : IDatabaseProvisioner
     private readonly string _adminConnectionString;
     private readonly string _host;
     private readonly int _port;
+    private readonly bool _requireTls;
 
     public string Engine => DatabaseEngine.MySql;
     public string Host => _host;
@@ -35,6 +36,37 @@ public class MySqlProvisioner : IDatabaseProvisioner
         // motores. Program.cs ya validó al arrancar que esté configurada.
         _host = provisioning.Value.IpVps;
         _port = int.TryParse(config["Provisioning:MySql:Port"], out var p) ? p : 3306;
+
+        // RequireTls: el servidor MySQL tiene TLS habilitado y lo exigimos. Es
+        // un flag y no una constante porque exigir TLS contra un motor que no lo
+        // tiene levantado deja a los usuarios sin poder conectarse: quien
+        // levante un ambiente sin certificado lo apaga acá en vez de tener que
+        // tocar código. Afecta dos cosas: el REQUIRE SSL del CREATE USER y las
+        // cadenas de conexión que se le entregan al usuario.
+        _requireTls = bool.TryParse(config["Provisioning:MySql:RequireTls"], out var tls) && tls;
+    }
+
+    /// <inheritdoc />
+    public ClientConnectionInfo BuildClientConnection(string dbName, string login, string password)
+    {
+        // ssl-mode (driver nativo / cliente de consola) y sslMode (JDBC) son la
+        // MISMA opción escrita distinto por cada driver — de ahí que se entreguen
+        // las dos cadenas ya armadas. REQUIRED cifra la conexión SIN exigir que
+        // el certificado esté firmado por una CA conocida, que es exactamente lo
+        // que hace falta acá: el certificado del servidor es autofirmado, así que
+        // VERIFY_CA/VERIFY_IDENTITY fallarían.
+        //
+        // El efecto práctico: con el canal ya cifrado, el intercambio de clave
+        // pública de caching_sha2_password ocurre dentro de TLS y el cliente deja
+        // de pedirle al usuario que active allowPublicKeyRetrieval a mano. Ver
+        // docs/bugs.md ítem 28.
+        var uriTls = _requireTls ? "?ssl-mode=REQUIRED" : string.Empty;
+        var jdbcTls = _requireTls ? "?sslMode=REQUIRED" : string.Empty;
+
+        return new ClientConnectionInfo(
+            $"mysql://{Uri.EscapeDataString(login)}:{Uri.EscapeDataString(password)}" +
+            $"@{_host}:{_port}/{dbName}{uriTls}",
+            $"jdbc:mysql://{_host}:{_port}/{dbName}{jdbcTls}");
     }
 
     public async Task<ProvisionResult> CreateAsync(
@@ -54,8 +86,16 @@ public class MySqlProvisioner : IDatabaseProvisioner
         // el uso a esa BD). El valor ya viene resuelto (y acotado a un cap) por
         // DatabaseProvisioningService — evita que una cuenta agote el pool de
         // conexiones del servidor compartido.
+        // REQUIRE SSL: el motor RECHAZA cualquier conexión sin cifrar de este
+        // usuario. Sin esto, el cifrado depende de que el cliente lo pida: la
+        // cadena que entregamos lo pide, pero un usuario que la edite (o una
+        // herramienta con TLS desactivado) mandaría usuario y contraseña en
+        // texto plano por el puerto público. Es la única mitad que no se puede
+        // eludir desde el cliente. Ver docs/bugs.md ítem 28.
+        var requireSsl = _requireTls ? " REQUIRE SSL" : string.Empty;
+
         await ExecAsync(conn,
-            $"CREATE USER {user} IDENTIFIED BY {QuoteLiteral(password)} " +
+            $"CREATE USER {user} IDENTIFIED BY {QuoteLiteral(password)}{requireSsl} " +
             $"WITH MAX_USER_CONNECTIONS {maxConcurrentConnections}", ct);
 
         await ExecAsync(conn, $"GRANT ALL PRIVILEGES ON {QuoteIdentifier(dbName)}.* TO {user}", ct);

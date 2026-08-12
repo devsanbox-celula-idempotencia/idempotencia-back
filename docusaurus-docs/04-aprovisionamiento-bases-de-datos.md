@@ -24,6 +24,39 @@ globales):
 | MySQL | 3306 | `MySqlProvisioner` |
 | MongoDB | 27017 | `MongoProvisioner` |
 
+## Cadenas de conexión y cifrado (TLS)
+
+La respuesta de creación (y el correo de credenciales) incluye la conexión ya
+armada, en dos formatos: `connectionUri` —formato nativo del motor, con las
+credenciales dentro— y `jdbcUrl` —la misma conexión para clientes de escritorio
+Java (DBeaver, Workbench, DataGrip), sin credenciales, `null` en Mongo—.
+
+El motivo no es comodidad: el parámetro que activa el cifrado se escribe distinto
+en cada motor y en cada driver, y equivocarse tiene consecuencias visibles. El
+caso concreto que lo motivó es MySQL, donde `caching_sha2_password` (el plugin de
+autenticación por defecto desde MySQL 8) exige un intercambio de clave RSA si la
+conexión no está cifrada; los clientes lo resuelven pidiéndole al usuario activar
+`allowPublicKeyRetrieval` a mano, que además habilita un MITM capaz de leer la
+contraseña en claro. Con la conexión cifrada, nada de eso hace falta.
+
+| Motor | Parámetro que se inyecta | `RequireTls` hoy |
+|---|---|---|
+| MySQL | `?ssl-mode=REQUIRED` (nativo) / `?sslMode=REQUIRED` (JDBC) | ✅ `true` |
+| SQL Server | `Encrypt=True;TrustServerCertificate=True` | ✅ `true` |
+| PostgreSQL | `?sslmode=require` | 🔴 `false` — el contenedor no tiene certificado todavía |
+| MongoDB | `&tls=true&tlsInsecure=true` | 🔴 `false` — ídem |
+
+Todos usan el modo que **cifra sin validar la cadena de confianza** del
+certificado, porque los certificados de estos servidores son autofirmados:
+validarla (`VERIFY_CA`, `verify-full`) fallaría siempre.
+
+En MySQL, además, los usuarios se crean con **`REQUIRE SSL`**: el motor rechaza
+conexiones sin cifrar de ese usuario. Es la única parte que el cliente no puede
+eludir — el parámetro de la cadena es un pedido, no una garantía. Se gobierna con
+el mismo flag `Provisioning:{Engine}:RequireTls`; ver
+[Configuración por ambiente](./configuracion-ambientes) y el ítem 28 de
+`docs/bugs.md`.
+
 ## Cuota de almacenamiento (`MaxStorageMB`)
 
 - **SQL Server**: aplicada nativamente con `MAXSIZE = {maxStorageMb}MB` en el

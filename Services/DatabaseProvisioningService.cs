@@ -67,6 +67,13 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
             var passwordHash = BCrypt.Net.BCrypt.HashPassword(password);
             await _repo.ConfirmDatabaseAsync(reservation.DatabaseId, passwordHash, ct);
 
+            // Cadenas de conexión ya armadas para el usuario (con el parámetro de
+            // TLS del motor incluido). Es solo construcción de strings sobre datos
+            // que ya tenemos, así que va después de confirmar: si algo falló antes,
+            // no hay conexión que entregar. Ver docs/bugs.md ítem 28.
+            var clientConn = provisioner.BuildClientConnection(
+                reservation.DbName, reservation.LoginName, password);
+
             return new CreateDatabaseResponse
             {
                 DatabaseId = reservation.DatabaseId,
@@ -78,7 +85,9 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
                 Host = result.Host,
                 Port = result.Port,
                 LoginName = reservation.LoginName,
-                Password = password
+                Password = password,
+                ConnectionUri = clientConn.Uri,
+                JdbcUrl = clientConn.JdbcUrl
             };
         }
         catch (Exception ex)
@@ -230,7 +239,9 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         // que algo salió mal para poder reintentar o contactar soporte, en
         // vez de quedarse bloqueado sin saberlo.
         var subject = $"Colmena — nueva contraseña para {detail.DbName}";
-        var body = EmailTemplates.DatabasePasswordReset(detail, newPassword);
+        var body = EmailTemplates.DatabasePasswordReset(
+            detail, newPassword,
+            provisioner.BuildClientConnection(detail.DbName, detail.LoginName, newPassword));
         await _email.SendAsync(userEmail, userFullName, subject, body, ct);
     }
 

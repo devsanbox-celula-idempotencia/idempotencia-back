@@ -18,6 +18,7 @@ public class PostgresProvisioner : IDatabaseProvisioner
     private readonly string _adminConnectionString;
     private readonly string _host;
     private readonly int _port;
+    private readonly bool _requireTls;
 
     public string Engine => DatabaseEngine.Postgres;
     public string Host => _host;
@@ -34,6 +35,30 @@ public class PostgresProvisioner : IDatabaseProvisioner
         // motores. Program.cs ya validó al arrancar que esté configurada.
         _host = provisioning.Value.IpVps;
         _port = int.TryParse(config["Provisioning:Postgres:Port"], out var p) ? p : 5432;
+
+        // Ver la nota de RequireTls en MySqlProvisioner. En Postgres arranca
+        // apagado: la imagen oficial no habilita TLS por defecto, y pedir
+        // sslmode=require contra un servidor sin certificado hace fallar la
+        // conexión del usuario. Prenderlo cuando el motor tenga TLS configurado.
+        _requireTls = bool.TryParse(config["Provisioning:Postgres:RequireTls"], out var tls) && tls;
+    }
+
+    /// <inheritdoc />
+    public ClientConnectionInfo BuildClientConnection(string dbName, string login, string password)
+    {
+        // sslmode=require: cifra sin validar la cadena de confianza del
+        // certificado (verify-ca/verify-full sí la validan y fallarían con un
+        // cert autofirmado). Misma grafía en libpq y en el driver JDBC.
+        //
+        // Postgres no tiene el problema de caching_sha2_password de MySQL —
+        // SCRAM no necesita intercambio de clave RSA— así que acá TLS es solo
+        // por confidencialidad de las credenciales en tránsito.
+        var tls = _requireTls ? "?sslmode=require" : string.Empty;
+
+        return new ClientConnectionInfo(
+            $"postgresql://{Uri.EscapeDataString(login)}:{Uri.EscapeDataString(password)}" +
+            $"@{_host}:{_port}/{dbName}{tls}",
+            $"jdbc:postgresql://{_host}:{_port}/{dbName}{tls}");
     }
 
     public async Task<ProvisionResult> CreateAsync(

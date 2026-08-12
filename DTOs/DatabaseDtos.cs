@@ -88,6 +88,23 @@ public class CreateDatabaseResponse
     // Credenciales (la contraseña en claro solo se entrega aquí, una vez).
     public string LoginName { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Cadena de conexión lista para pegar, en el formato nativo del motor y con
+    /// las credenciales incluidas (para SQL Server es la cadena de keywords de
+    /// ADO.NET, no una URI). Trae el parámetro de TLS ya puesto donde el motor lo
+    /// exige, así el usuario no tiene que agregarlo a mano — en MySQL, además,
+    /// es lo que evita el paso manual de activar <c>allowPublicKeyRetrieval</c>.
+    /// </summary>
+    public string ConnectionUri { get; set; } = string.Empty;
+
+    /// <summary>
+    /// La misma conexión como URL JDBC, para clientes de escritorio Java
+    /// (DBeaver, Workbench, DataGrip) que ofrecen "conectar por URL". Va sin
+    /// credenciales porque esos clientes las piden en campos aparte.
+    /// <c>null</c> en MongoDB, que no tiene driver JDBC estándar.
+    /// </summary>
+    public string? JdbcUrl { get; set; }
 }
 
 /// <summary>Representación de lectura de una BD del usuario autenticado.</summary>

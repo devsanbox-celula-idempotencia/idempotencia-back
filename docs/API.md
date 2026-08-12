@@ -57,6 +57,8 @@ que el frontend sepa qué es seguro loguear/persistir y qué no:
 | `email`, `fullName`, `role` | `AuthResponse` | Es tu propia información, no la de otros usuarios — ningún endpoint devuelve datos de otro usuario. |
 | `mySqlDatabase.password` / `password` en `POST /databases` | Una sola vez, al crearse la BD | **Alta sensibilidad** — es la contraseña real de una BD física. Se entrega UNA vez y no se puede recuperar después (el backend solo guarda el hash). Muéstrala al usuario y no la persistas en tu propio backend/logs. |
 | `host`, `port`, `loginName` de la BD | `POST /databases`, `mySqlDatabase` | Es la info de conexión de TU propia BD — necesaria para que puedas conectarte, no expone datos de otros. |
+| `connectionUri` | `POST /databases`, `mySqlDatabase` | **Alta sensibilidad — contiene la contraseña embebida.** Trátala igual que `password`: mostrarla al usuario (con botón de copiar), nunca loguearla, nunca mandarla a analytics ni persistirla en el backend del front. |
+| `jdbcUrl` | `POST /databases`, `mySqlDatabase` | Bajo riesgo — va **sin** credenciales a propósito (los clientes Java las piden en campos aparte). Es equivalente a `host`+`port`+`dbName`. |
 | Datos de otras BDs/usuarios | — | `GET /databases` y `POST /databases` están filtrados por el `userId` del JWT (vía SP); no hay forma de pedir las BDs de otro usuario. |
 | Mensajes de error de login | `POST /auth/login` | **Riesgo asumido desde 2026-07-29** — ver `docs/bugs.md` ítem 14, sección "Reversión". El mensaje distingue "correo no registrado", "cuenta OAuth-only" y "contraseña incorrecta", así que un tercero puede confirmar si un correo está registrado mandando `POST /auth/login` con cualquier contraseña. Se aceptó a cambio de claridad para el usuario; lo único que contiene el sondeo es el rate limit de 10 intentos/min por IP. |
 | PII en el redirect OAuth | `email`, `fullName`, `role`, `userId`, `token` en la query string | **Hallazgo abierto** — ver `docs/bugs.md` ítems 1 y 15. El navegador guarda esto en su historial y puede quedar en logs de acceso del servidor/proxy. Limpia la URL (`history.replaceState`) apenas la leas (ver sección 4.3). |
@@ -115,7 +117,9 @@ viene poblado:
     "host": "100.99.206.50",
     "port": 3306,
     "loginName": "usr_colmena_u12_principal",
-    "password": "P4ssGeneradaUnaVez"
+    "password": "P4ssGeneradaUnaVez",
+    "connectionUri": "mysql://usr_colmena_u12_principal:P4ssGeneradaUnaVez@100.99.206.50:3306/colmena_u12_principal?ssl-mode=REQUIRED",
+    "jdbcUrl": "jdbc:mysql://100.99.206.50:3306/colmena_u12_principal?sslMode=REQUIRED"
   }
 }
 ```
@@ -347,9 +351,32 @@ repetirse en bucle.
   "host": "100.99.206.50",
   "port": 1433,
   "loginName": "usr_colmena_u12_proyecto_ana",
-  "password": "P4ssGeneradaUnaVez"
+  "password": "P4ssGeneradaUnaVez",
+  "connectionUri": "Server=100.99.206.50,1433;Database=colmena_u12_proyecto_ana;User Id=usr_colmena_u12_proyecto_ana;Password=P4ssGeneradaUnaVez;Encrypt=True;TrustServerCertificate=True;",
+  "jdbcUrl": "jdbc:sqlserver://100.99.206.50:1433;databaseName=colmena_u12_proyecto_ana;encrypt=true;trustServerCertificate=true"
 }
 ```
+
+> **`connectionUri` y `jdbcUrl` (nuevos, 2026-07-30)** — cadenas listas para
+> pegar, armadas por el backend con el parámetro de cifrado que cada motor
+> necesita ya incluido. Muéstralas con un botón de "copiar": es lo que evita que
+> el usuario tenga que configurar TLS a mano en su cliente. En MySQL eso es lo
+> que hacía falta para no tener que activar `allowPublicKeyRetrieval` (ver
+> `docs/bugs.md` ítem 28).
+>
+> - `connectionUri` — formato nativo del motor, **con las credenciales dentro**
+>   (en SqlServer es la cadena de keywords de ADO.NET, no una URI). Sirve para
+>   clientes de consola y para herramientas que aceptan una cadena completa.
+> - `jdbcUrl` — la misma conexión para clientes de escritorio Java (DBeaver,
+>   Workbench, DataGrip → "conectar por URL"), **sin** credenciales. Es `null`
+>   en Mongo, que no tiene driver JDBC estándar: no lo muestres en ese caso.
+>
+> Formato del parámetro de cifrado por motor: `?ssl-mode=REQUIRED` /
+> `?sslMode=REQUIRED` (MySQL), `?sslmode=require` (Postgres),
+> `Encrypt=True;TrustServerCertificate=True` (SqlServer), `&tls=true` (Mongo).
+> Aparece solo en los motores donde el servidor tiene TLS habilitado
+> (`Provisioning:{Engine}:RequireTls`): hoy MySQL y SqlServer sí, Postgres y
+> Mongo todavía no.
 
 > `maxConcurrentConnections` en la respuesta es el valor **efectivamente
 > aplicado** (ya acotado al cap), puede diferir de lo pedido. Vale `0` en
@@ -436,7 +463,12 @@ JWT Bearer
 Pensado para cuando el usuario perdió sus datos de conexión (host, puerto,
 usuario) y necesita volver a verlos. **Nunca** incluye `password` — no se
 puede recuperar (el backend solo guarda el hash); para eso existe la sección
-6.6 (reset de contraseña).
+6.7 (reset de contraseña).
+
+Tampoco incluye `connectionUri` ni `jdbcUrl`, por la misma razón: la cadena
+completa lleva la contraseña dentro y acá no hay contraseña que poner. Si el
+usuario necesita la cadena armada de nuevo, el camino es resetear la contraseña
+(sección 6.7) y usar la que llega por correo.
 
 **Respuesta `200 OK`:**
 ```json
@@ -569,6 +601,10 @@ registrada del usuario. Requiere que la BD esté `Active`.
 > que quede en el historial de red del navegador o en logs de acceso. El
 > frontend debe mostrar un mensaje tipo "revisa tu correo", no esperar un
 > campo `password` en la respuesta.
+
+> Desde 2026-07-30 ese correo incluye además la **cadena de conexión completa**
+> (y la URL JDBC donde aplica), ya armada con la contraseña nueva y el cifrado
+> configurado. El usuario copia y pega; no tiene que rearmar nada.
 
 **Respuesta `200 OK`:**
 ```json
@@ -769,9 +805,259 @@ async function getMyDatabases() {
 | `DELETE /databases/{id}` | ✅ Desplegado y confirmado (2026-07-23) — `sp_DeleteDatabase` en la BD real. Borrado físico real, solo si la BD está `Inactive`. |
 | `POST /databases/{id}/reset-password` | ✅ Desplegado y confirmado (2026-07-23) — `sp_ResetDatabasePassword` en la BD real y SMTP configurado; la contraseña nueva llega por correo. |
 | `GET /statistics` (solo Admin) | ⚠️ Código completo; depende de `sp_GetPlatformStatistics`, no verificado en vivo todavía. |
+| `POST /dns` · `GET /dns` · `GET /dns/{id}` · `PUT /dns/{id}` · `DELETE /dns/{id}` · `GET /dns/zone` | 🆕 Autoservicio de subdominios `{label}.idempotencia.coderhivex.com` (2026-08-12). Depende de 7 SPs nuevos (`sql/2026-08-12-dns-records.sql`, **sin desplegar**), de la sección `Dns` y de **ACM/Total TLS contratado en la zona** (sin eso no hay HTTPS válido). Contrato en la sección 11. |
+| `GET /admin/dns` · `GET /admin/dns/{id}` · `POST /admin/dns/{id}/revoke` | 🆕 Auditoría y revocación, rol `Admin` (2026-08-12). Depende de 3 SPs nuevos, **sin desplegar**. Contrato en la sección 12. Cambios de BD en [`docs/cambios-db-dns-2026-08-12.md`](cambios-db-dns-2026-08-12.md); flujo completo en `docusaurus-docs/08-dns-subdominios.md`. |
 
 **Aislamiento entre usuarios en el motor físico** (relevante si el frontend
 alguna vez conecta directo a las BDs, no solo vía esta API): SQL Server y
 Postgres ya restringen qué bases puede ver/a cuáles conectarse un usuario
 recién creado; MySQL tiene una limitación conocida del motor (nombres de
 otras BDs visibles, pero no sus datos) — detalle en `bugs.md` ítem 13.
+
+---
+
+## 11. Subdominios DNS — autoservicio (protegidos)
+
+> Sección agregada el 2026-08-12. Va al final y no intercalada entre las de
+> bases de datos y estadísticas para no renumerar las secciones 7–10, a las que
+> `bugs.md` y `claude.md` ya apuntan por número.
+>
+> Guía completa (incluido el procedimiento administrativo) en
+> `docusaurus-docs/08-dns-subdominios.md`.
+
+Cada usuario puede crear subdominios propios para sus proyectos:
+
+```
+[nombre-elegido].idempotencia.coderhivex.com     ej: airflow.idempotencia.coderhivex.com
+```
+
+El **nombre** lo define el usuario; la **célula** y el dominio los pone el
+backend (`idempotencia` y `coderhivex.com`), así que el frontend solo manda
+`label` e `ipAddress`. Se crea un registro **A proxeado** hacia la IPv4
+pública que aporta el usuario; el HTTPS lo resuelve Cloudflare automáticamente.
+
+Todos los endpoints requieren `Authorization: Bearer <jwt>`.
+
+**Cuota: 3 subdominios vivos por usuario.** Los eliminados y revocados no cuentan.
+
+### 11.1 Conocer la zona
+
+```http
+GET /dns/zone
+```
+
+```json
+{
+  "zoneName": "coderhivex.com",
+  "defaultCell": "idempotencia",
+  "pattern": "{label}.idempotencia.coderhivex.com"
+}
+```
+
+El `pattern` viene ya resuelto con la célula por defecto: alcanza con reemplazar
+`{label}` por lo que el usuario escribe.
+
+Úsalo para la vista previa del nombre completo mientras el usuario escribe. **No
+hardcodees el dominio**: cambia entre ambientes y quedaría desincronizado sin que
+nadie se entere.
+
+### 11.2 Crear un subdominio
+
+```http
+POST /dns
+Content-Type: application/json
+
+{
+  "label": "airflow",
+  "ipAddress": "203.0.113.10"
+}
+```
+
+| Campo | Obligatorio | Reglas |
+|---|---|---|
+| `label` | sí | 3–63 caracteres, solo `a-z`, `0-9` y `-`. No puede empezar ni terminar con guion, ni contener puntos. Se normaliza a minúsculas. |
+| `cell` | **no** | Si se omite se usa `idempotencia` (`Dns:DefaultCell`), la única célula del despliegue actual. Mismas reglas de formato que `label`. |
+| `ipAddress` | sí | IPv4 **pública**. |
+
+Respuesta `201 Created`:
+
+```json
+{
+  "dnsRecordId": 12,
+  "label": "airflow",
+  "cell": "idempotencia",
+  "fqdn": "airflow.idempotencia.coderhivex.com",
+  "recordType": "A",
+  "ipAddress": "203.0.113.10",
+  "proxied": true,
+  "ttl": 1,
+  "status": "Active",
+  "createdAt": "2026-08-12T15:04:11.120Z",
+  "updatedAt": "2026-08-12T15:04:11.120Z"
+}
+```
+
+**La IP tiene que ser alcanzable desde internet.** Se rechazan rangos privados
+(`10.x`, `172.16–31.x`, `192.168.x`), loopback (`127.x`), link-local
+(`169.254.x`) y **CGNAT (`100.64.x`–`100.127.x`, el rango de Tailscale)**. El
+registro va proxeado, así que quien se conecta al origen es el borde de
+Cloudflare desde internet: una IP privada es válida como IPv4 y perfectamente
+inalcanzable desde ahí, y el subdominio se crearía sin error para fallar después
+con un 522 que no explica nada.
+
+Errores propios de este endpoint:
+
+| Código | Cuándo |
+|---|---|
+| `400` | `label` o `cell` con formato inválido. |
+| `400` | `label` o `cell` reservados (`www`, `api`, `mail`, `admin`, `db`…). |
+| `400` | La IP no es pública. |
+| `400` | Se alcanzó la cuota de 3 subdominios. |
+| `409` | Ese subdominio ya está en uso. |
+| `429` | Más de 10 escrituras por minuto (política `dns`). |
+| `502` | El proveedor de DNS respondió con error. Reintentar. |
+
+Un `409` o un `400` de nombre son **corregibles por el usuario**: la UI debería
+sugerirle probar otro nombre, no mostrar un error genérico.
+
+### 11.3 Listar y ver
+
+```http
+GET /dns          # mis subdominios vivos
+GET /dns/{id}     # detalle
+```
+
+`404` si no existe **o si no es del usuario** — el mismo mensaje para ambos
+casos, igual que en `/databases/{id}`, para no revelar qué identificadores ajenos
+existen.
+
+### 11.4 Reapuntar a otra IP
+
+```http
+PUT /dns/{id}
+Content-Type: application/json
+
+{ "ipAddress": "203.0.113.99" }
+```
+
+**El nombre no se puede cambiar** (eso sería otro subdominio: se borra y se
+crea), y **el body no acepta `proxied` ni `ttl`**: los fija la plataforma porque
+de ellos depende el certificado (§11.6). Requiere estado `Active`.
+
+### 11.5 Eliminar
+
+```http
+DELETE /dns/{id}
+```
+
+`204 No Content`. Libera el nombre: la misma combinación `label` + `cell` se
+puede volver a pedir, incluso por otra persona.
+
+A diferencia de las bases de datos, **no hay que desactivarlo primero**. Ese paso
+existe en `/databases` para proteger datos antes de un borrado irreversible; acá
+no hay datos que proteger y la operación es reversible volviendo a crear el
+subdominio.
+
+Es tolerante: si el registro ya no existe en el proveedor (alguien lo borró a
+mano en el panel), igual limpia el catálogo en vez de dejar la fila atascada.
+
+### 11.6 HTTPS y propagación
+
+El certificado se emite solo, pero **depende de que la zona tenga Advanced
+Certificate Manager con Total TLS activado**. El comodín gratuito de Cloudflare
+cubre `*.coderhivex.com` —un solo nivel— y estos nombres tienen dos, así que sin
+ACM el subdominio resuelve pero da error de certificado. Detalle y el `curl` para
+activarlo, en `docusaurus-docs/08-dns-subdominios.md`.
+
+Como el registro está proxeado, `dig` devuelve **IPs de Cloudflare, no la del
+usuario**. Es correcto. Y el proxy solo enruta HTTP/HTTPS: estos subdominios no
+sirven para exponer un puerto TCP arbitrario.
+
+La propagación no es instantánea (segundos, con TTL automático). La UI no debería
+prometer disponibilidad inmediata.
+
+```bash
+dig +short airflow.idempotencia.coderhivex.com
+curl -sI https://airflow.idempotencia.coderhivex.com | head -1
+```
+
+---
+
+## 12. Administración de subdominios (solo Admin)
+
+Requieren `Authorization: Bearer <jwt>` con rol `Admin`: token inválido o
+expirado → `401`, usuario sin el rol → `403`.
+
+### 12.1 Auditar el inventario
+
+```http
+GET /admin/dns
+```
+
+Sin filtros devuelve todos los subdominios **vivos** de todos los usuarios,
+del más antiguo al más reciente. Cada fila agrega el dueño y la antigüedad:
+
+```json
+[
+  {
+    "dnsRecordId": 12,
+    "userId": 7,
+    "userEmail": "ana@coderhivex.com",
+    "label": "airflow",
+    "cell": "idempotencia",
+    "fqdn": "airflow.idempotencia.coderhivex.com",
+    "recordType": "A",
+    "ipAddress": "203.0.113.10",
+    "proxied": true,
+    "ttl": 1,
+    "status": "Active",
+    "daysSinceUpdate": 97,
+    "createdAt": "2026-05-07T10:11:00.000Z",
+    "updatedAt": "2026-05-07T10:11:00.000Z",
+    "deletedAt": null
+  }
+]
+```
+
+| Parámetro | Ejemplo | Para qué |
+|---|---|---|
+| `cell` | `?cell=idempotencia` | Qué tiene levantado un equipo |
+| `userId` | `?userId=7` | Todo lo de una persona |
+| `status` | `?status=Revoked` | Histórico — sin este filtro solo se ven los vivos |
+| `minDaysSinceUpdate` | `?minDaysSinceUpdate=90` | Candidatos a revocar por inactividad |
+
+Estados: `Provisioning`, `Active`, `Failed`, `Deleted`, `Revoked`. Un `status`
+desconocido devuelve `400` en vez de una lista vacía, que sería indistinguible de
+"no hay registros en ese estado".
+
+### 12.2 Detalle sin filtro de propiedad
+
+```http
+GET /admin/dns/{id}
+```
+
+Incluye los estados terminales (`Deleted`/`Revoked`) — auditar es poder mirar lo
+que ya no está vivo.
+
+### 12.3 Revocar
+
+```http
+POST /admin/dns/{id}/revoke
+Content-Type: application/json
+
+{ "reason": "Inactivo por más de 90 días; se avisó al equipo el 2026-08-01." }
+```
+
+Elimina el registro en Cloudflare y lo marca `Revoked` en el catálogo con quién,
+cuándo y por qué. El motivo es **obligatorio** (mínimo 10 caracteres).
+
+Es `POST` y no `DELETE` porque lleva cuerpo obligatorio, y un `DELETE` con cuerpo
+es algo que muchos proxies descartan en silencio.
+
+`Revoked` es un estado distinto de `Deleted` a propósito: los dos liberan el
+nombre, pero solo así una auditoría puede distinguir lo que el usuario dio de
+baja de lo que el equipo le quitó.
+
+**La plataforma no avisa al dueño.** El `userEmail` del listado está para que el
+equipo lo contacte antes: un servicio que deja de resolver sin aviso es
+indistinguible de una caída.
