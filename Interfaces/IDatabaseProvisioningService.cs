@@ -35,10 +35,20 @@ public interface IDatabaseProvisioningService
     /// <summary>
     /// Restaura el acceso físico revocado por <see cref="DeactivateAsync"/> y
     /// devuelve la BD a 'Active'. Requiere que esté 'Inactive'. Los datos nunca
-    /// se tocaron al desactivar, así que la BD vuelve tal cual estaba y con la
-    /// misma contraseña. Reintentable sin riesgo.
+    /// se tocaron al desactivar, así que la BD vuelve tal cual estaba.
+    /// Reintentable sin riesgo.
+    ///
+    /// En los cuatro motores locales vuelve además con la MISMA contraseña, y
+    /// <paramref name="userEmail"/>/<paramref name="userFullName"/> no se usan.
+    /// Se reciben por MongoDB aprovisionado contra la API externa: ahí
+    /// desactivar se emula rotando la credencial y descartándola, así que
+    /// reactivar tiene que emitir una contraseña nueva y enviarla por correo —
+    /// mismo criterio que <see cref="ResetPasswordAsync"/>, la contraseña nunca
+    /// vuelve en la respuesta HTTP. La respuesta del endpoint no cambia.
     /// </summary>
-    Task<DatabaseDetailResponse> ReactivateAsync(int userId, int databaseId, CancellationToken ct = default);
+    Task<DatabaseDetailResponse> ReactivateAsync(
+        int userId, int databaseId, string userEmail, string userFullName,
+        CancellationToken ct = default);
 
     /// <summary>
     /// Elimina físicamente la BD + usuario (irreversible) y la marca 'Deleted'

@@ -109,7 +109,7 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         return new ProvisionResult(_host, _port);
     }
 
-    public async Task DropAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task DropAsync(string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         var db = QuoteIdentifier(dbName);
         var lg = QuoteIdentifier(login);
@@ -127,7 +127,9 @@ public class SqlServerProvisioner : IDatabaseProvisioner
             $"IF SUSER_ID({QuoteLiteral(login)}) IS NOT NULL DROP LOGIN {lg};", ct);
     }
 
-    public async Task ChangePasswordAsync(string dbName, string login, string newPassword, CancellationToken ct = default)
+    public async Task<CredentialRotationResult?> ChangePasswordAsync(
+        string dbName, string login, string newPassword, string? externalId,
+        CancellationToken ct = default)
     {
         var lg = QuoteIdentifier(login);
 
@@ -135,9 +137,14 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         await conn.OpenAsync(ct);
 
         await ExecAsync(conn, $"ALTER LOGIN {lg} WITH PASSWORD = {QuoteLiteral(newPassword)};", ct);
+
+        // Este provisioner SÍ aplica la contraseña que recibe, así que no hay
+        // nada nuevo que devolver: null significa "quedó vigente la que me
+        // pasaste". Ver CredentialRotationResult.
+        return null;
     }
 
-    public async Task DeactivateAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task DeactivateAsync(string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         var lg = QuoteIdentifier(login);
 
@@ -150,7 +157,8 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"ALTER LOGIN {lg} DISABLE;", ct);
     }
 
-    public async Task ReactivateAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task<CredentialRotationResult?> ReactivateAsync(
+        string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         var lg = QuoteIdentifier(login);
 
@@ -161,6 +169,11 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         // borró ni perdió sus permisos dentro de la BD, así que ENABLE basta
         // para dejarlo como estaba, con la misma contraseña.
         await ExecAsync(conn, $"ALTER LOGIN {lg} ENABLE;", ct);
+
+        // Este provisioner SÍ aplica la contraseña que recibe, así que no hay
+        // nada nuevo que devolver: null significa "quedó vigente la que me
+        // pasaste". Ver CredentialRotationResult.
+        return null;
     }
 
     public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)

@@ -148,4 +148,40 @@ public class DatabaseRepository : IDatabaseRepository
             "EXEC sp_UpdateDatabaseSize @DatabaseId, @CurrentSizeMB",
             new object[] { pDatabaseId, pSize }, ct);
     }
+
+    public async Task SetDatabaseExternalRefAsync(
+        int databaseId, string externalId, string? externalDbName, CancellationToken ct = default)
+    {
+        var pDatabaseId = new SqlParameter("@DatabaseId", System.Data.SqlDbType.Int) { Value = databaseId };
+        var pExternalId = new SqlParameter("@ExternalId", System.Data.SqlDbType.NVarChar, 100)
+        {
+            Value = externalId
+        };
+
+        // DBNull explícito y no null de C#: SqlParameter con Value = null se
+        // envía como "parámetro sin asignar" y el SP recibiría basura en vez de
+        // NULL. Pasa cuando el servicio externo no reporta un nombre físico.
+        var pExternalDbName = new SqlParameter("@ExternalDbName", System.Data.SqlDbType.NVarChar, 128)
+        {
+            Value = (object?)externalDbName ?? DBNull.Value
+        };
+
+        await _db.Database.ExecuteSqlRawAsync(
+            "EXEC sp_SetDatabaseExternalRef @DatabaseId, @ExternalId, @ExternalDbName",
+            new object[] { pDatabaseId, pExternalId, pExternalDbName }, ct);
+    }
+
+    public async Task<ExternalDatabaseRef?> GetDatabaseExternalRefAsync(
+        int databaseId, int userId, CancellationToken ct = default)
+    {
+        var pDatabaseId = new SqlParameter("@DatabaseId", System.Data.SqlDbType.Int) { Value = databaseId };
+        var pUserId = new SqlParameter("@UserId", System.Data.SqlDbType.Int) { Value = userId };
+
+        var result = await _db.ExternalDatabaseRefs
+            .FromSqlRaw("EXEC sp_GetDatabaseExternalRef @DatabaseId, @UserId", pDatabaseId, pUserId)
+            .AsNoTracking()
+            .ToListAsync(ct);
+
+        return result.FirstOrDefault();
+    }
 }

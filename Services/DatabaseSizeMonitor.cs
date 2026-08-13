@@ -13,6 +13,11 @@ namespace idempotencia.Services;
 /// nunca, así que la API reportaba un tamaño que jamás correspondía a la
 /// realidad (docs/bugs.md ítem 25).
 ///
+/// No todos los motores se pueden medir: MongoDB aprovisionado contra la API
+/// externa del equipo no expone tamaño por base, así que su provisioner devuelve
+/// un negativo y el job lo salta conservando el último valor conocido. Se cuenta
+/// aparte de los fallos porque no hay nada que reintentar.
+///
 /// Principio de diseño: el job es de MEJOR ESFUERZO y nunca debe tumbar la
 /// aplicación. Un motor caído, una BD borrada por fuera o un timeout afectan
 /// como mucho a la medición de esa base; el ciclo continúa con las demás y el
@@ -106,7 +111,7 @@ public class DatabaseSizeMonitor : BackgroundService
             return;
         }
 
-        int actualizadas = 0, sinCambio = 0, fallidas = 0;
+        int actualizadas = 0, sinCambio = 0, fallidas = 0, noMedibles = 0;
 
         foreach (var db in databases)
         {
@@ -122,6 +127,18 @@ public class DatabaseSizeMonitor : BackgroundService
 
                 var provisioner = factory.Get(db.Engine);
                 var measured = await provisioner.GetSizeMbAsync(db.DbName, perDb.Token);
+
+                // Negativo = "este motor no permite medir" (hoy: MongoDB
+                // delegado en la API externa, que no expone tamaño por base).
+                // Es distinto de 0: cero afirmaría que la base está vacía y se
+                // persistiría, pisando el último tamaño conocido con un dato
+                // falso. Tampoco se cuenta como fallo — no hay nada que
+                // reintentar el próximo ciclo, es una propiedad del motor.
+                if (measured < 0)
+                {
+                    noMedibles++;
+                    continue;
+                }
 
                 // Se escribe solo si cambió. El caso normal es que la mayoría de
                 // las bases no se muevan entre ciclos; evitar el UPDATE ahorra
@@ -157,8 +174,8 @@ public class DatabaseSizeMonitor : BackgroundService
         // Debug para no inundar los logs cada 15 minutos.
         _logger.LogInformation(
             "Sincronización de tamaños: {Total} bases activas — {Actualizadas} actualizadas, " +
-            "{SinCambio} sin cambio, {Fallidas} con error.",
-            databases.Count, actualizadas, sinCambio, fallidas);
+            "{SinCambio} sin cambio, {NoMedibles} no medibles, {Fallidas} con error.",
+            databases.Count, actualizadas, sinCambio, noMedibles, fallidas);
     }
 
     /// <summary>

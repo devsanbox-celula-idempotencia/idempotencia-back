@@ -1094,6 +1094,130 @@ frontend, en la línea de las dos guías de bases de datos),
 
 ---
 
+## Sesión 18 — 2026-08-12 (MongoDB pasa a aprovisionarse contra la API externa del equipo)
+
+**Pedido original:** el equipo entregó una API de aprovisionamiento de MongoDB
+(`https://mongo.szapatar.dev`, API key de tipo `team` para el equipo
+`Idempotencia`) con su contrato de endpoints, y se pidió integrarla **sin
+cambiar los endpoints ya creados** de este backend.
+
+**El problema de fondo:** esa API no es un reemplazo pieza-por-pieza del
+`MongoProvisioner` local. Choca con tres supuestos que el orquestador daba por
+sentados desde el día uno:
+
+1. **El nombre físico lo decide ella.** `POST /databases` genera un nombre
+   aleatorio, independiente del `username` que se le manda, así que el nombre
+   que reserva `sp_ReserveDatabase` deja de ser el nombre real de la base.
+2. **La contraseña la decide ella.** La genera y la devuelve; no acepta una
+   impuesta. `PasswordGenerator` deja de mandar en este motor.
+3. **Se direcciona por `id`, no por nombre.** Borrar y rotar credenciales son
+   `DELETE /databases/{id}` y `POST /databases/{id}/credentials/reset`; sin
+   guardar ese id, una base creada por la API queda imposible de eliminar desde
+   Colmena.
+
+Y no ofrece dos cosas que los endpoints existentes sí prometen: **desactivar/
+reactivar** y **tamaño por base**.
+
+**Decisiones tomadas (confirmadas con el usuario antes de escribir código):**
+
+- **Reemplazar, no convivir.** `Engine = "Mongo"` sigue siendo el mismo valor;
+  no se agregó un motor nuevo ni se tocó el regex de `CreateDatabaseRequest`.
+  Cero cambios de ruta, método, auth o rate limit.
+- **Persistir la referencia externa en el catálogo** (columnas nuevas + SPs),
+  en vez de resolver el id llamando a `GET /teams/{team}/databases` en cada
+  operación. El listado quedó igual como plan B.
+- **Emular desactivar/reactivar rotando credenciales.** Desactivar rota y
+  **descarta** la contraseña nueva: nadie la conoce, la credencial vieja muere,
+  la base queda inalcanzable y los datos intactos. Reactivar rota otra vez y
+  **sí** entrega la nueva, por correo. `GetSizeMbAsync` devuelve `-1`
+  ("no medible") y el job conserva el último valor conocido.
+
+**Qué se hizo:**
+
+- [`Provisioners/RemoteMongoProvisioner.cs`](../Provisioners/RemoteMongoProvisioner.cs)
+  — nuevo. `HttpClient` tipado contra la API, con `X-API-Key`. Mismo rol
+  arquitectónico que `CloudflareDnsProvider`: adaptador hacia un sistema
+  externo. Incluye el fallback que resuelve el id por
+  `GET /teams/{team}/databases` cuando el catálogo no lo tiene.
+- [`Interfaces/IDatabaseProvisioner.cs`](../Interfaces/IDatabaseProvisioner.cs)
+  — el contrato crece en dos puntos, ambos no-ops para los motores locales:
+  los cuatro métodos de ciclo de vida reciben `externalId`, y las dos
+  rotaciones de credencial devuelven `CredentialRotationResult?` (`null` =
+  "apliqué la contraseña que me pasaste"). Se documentó además la convención
+  del negativo en `GetSizeMbAsync`.
+- [`Models/ProvisionResult.cs`](../Models/ProvisionResult.cs) — campos
+  opcionales nuevos (`ExternalId`, `EffectiveDbName`, `EffectivePassword`,
+  `ConnectionUri`) para que un provisioner pueda reportar lo que REALMENTE
+  quedó creado cuando no coincide con lo que se le pidió. Los cuatro locales
+  siguen construyéndolo con dos argumentos.
+- [`Models/CredentialRotationResult.cs`](../Models/CredentialRotationResult.cs) y
+  [`Models/ExternalDatabaseRef.cs`](../Models/ExternalDatabaseRef.cs) — nuevos.
+- [`Services/DatabaseProvisioningService.cs`](../Services/DatabaseProvisioningService.cs)
+  — usa los valores efectivos al crear, persiste la referencia externa **antes**
+  de confirmar (si esa escritura falla, la reversión todavía tiene el id en
+  memoria para borrar la base del otro lado), y lee la referencia en todo el
+  ciclo de vida. La lógica de "hashear + notificar una contraseña rotada" se
+  extrajo a un método compartido por el reset y la reactivación.
+- [`Services/RemoteMongoSettings.cs`](../Services/RemoteMongoSettings.cs) —
+  nuevo, sección `Provisioning:Mongo:Remote`. `Program.cs` valida al arrancar
+  que si `Enabled` está en `true` haya `ApiKey`, mismo criterio que
+  `Provisioning:IpVps` y `Dns:ApiToken`.
+- [`Program.cs`](../Program.cs) — registra **exactamente uno** de los dos
+  provisioners de Mongo según `Provisioning:Mongo:Remote:Enabled`. El factory
+  resuelve por `Engine`, así que registrar ambos dejaría la elección al orden
+  de la colección de DI.
+- [`Provisioners/MongoProvisioner.cs`](../Provisioners/MongoProvisioner.cs) —
+  se conserva y se mantiene compilando. Es el camino de vuelta (`Enabled=false`)
+  y la única forma de seguir operando las bases de Mongo creadas **antes** de
+  la migración, que viven en el servidor propio y no existen en la API externa.
+- [`Services/DatabaseSizeMonitor.cs`](../Services/DatabaseSizeMonitor.cs) — salta
+  las mediciones negativas y las cuenta aparte de los fallos (`noMedibles`): no
+  hay nada que reintentar, es una propiedad del motor.
+- [`Services/EmailTemplates.cs`](../Services/EmailTemplates.cs) — plantilla nueva
+  `DatabaseReactivatedCredentials`, para el único caso en que reactivar entrega
+  una contraseña nueva.
+- [`sql/2026-08-12-mongo-external-ref.sql`](../sql/2026-08-12-mongo-external-ref.sql)
+  — nuevo. Agrega `ExternalId`/`ExternalDbName` a `ProvisionedDatabases` y crea
+  `sp_SetDatabaseExternalRef` + `sp_GetDatabaseExternalRef`. **No toca ningún SP
+  existente** — se eligió un SP de lectura aparte justamente para no reescribir
+  `sp_GetDatabaseDetail`, cuya definición no está versionada en el repo.
+  Idempotente.
+
+**Cambio de comportamiento visible para el frontend** (la forma de las
+respuestas NO cambia, el contenido sí):
+
+- `POST /databases` con `engine: "Mongo"` devuelve en `dbName` el nombre que
+  generó la API externa, no el del catálogo. `GET /databases/{id}` reporta el
+  mismo. Es el nombre al que el usuario realmente se conecta.
+- `POST /databases/{id}/reactivate` con Mongo **envía un correo con una
+  contraseña nueva**; en los otros tres motores sigue sin mandar nada porque la
+  contraseña de siempre vuelve a funcionar. La respuesta HTTP es idéntica en
+  ambos casos y nunca incluye la contraseña.
+- `currentSizeMB` de las bases Mongo se congela en su último valor conocido.
+
+**Pendiente al cierre (nada de esto se pudo hacer en esta sesión):**
+
+1. **No se compiló.** El entorno de esta sesión no tiene el SDK de .NET y no
+   pudo instalarlo (proxy). El cambio se revisó estáticamente miembro por
+   miembro contra la interfaz, pero falta un `dotnet build` real.
+2. **No se probó contra la API.** `mongo.szapatar.dev` no pasa el proxy de este
+   entorno, así que el contrato se implementó tal como está escrito en el
+   documento del equipo. El punto más frágil es el formato exacto de
+   `connectionString` (de ahí salen host y puerto): se parsea con `MongoUrl` y
+   se cae a `PublicHost`/`PublicPort` si no se entiende.
+3. **Falta ejecutar `sql/2026-08-12-mongo-external-ref.sql`** contra la BD real
+   antes de desplegar. Sin ese script, toda creación de Mongo falla al intentar
+   guardar la referencia externa (y revierte limpio, pero falla).
+4. **Mover la API key a variable de entorno** (`Provisioning__Mongo__Remote__ApiKey`)
+   en vez de dejarla en `appsettings.json`, mismo criterio que el resto de
+   secretos del proyecto (`bugs.md` ítem 3).
+
+**Documentos actualizados:** `docs/routes.md` (nota de revisión — sin cambios de
+rutas), `docs/API.md` (cambio de comportamiento de reactivate y de `dbName` en
+Mongo) y este archivo.
+
+---
+
 ## Backlog / próximos pasos
 
 1. **Redesplegar el backend actual a QA** para que lleguen los fixes ya
@@ -1183,3 +1307,25 @@ frontend, en la línea de las dos guías de bases de datos),
 redirect y validación de email 150 ya estaban en el código (falta redeploy a
 QA); connection string a master aceptado como deuda técnica (ítem 22); GitHub
 SSO documentado como comportamiento esperado (ítem 23).
+
+11. **Compilar y probar la integración con la API externa de MongoDB**
+    (sesión 18): `dotnet build`, y luego un ciclo completo en vivo contra
+    `https://mongo.szapatar.dev` — crear una BD Mongo, conectarse con la
+    `connectionUri` devuelta, desactivar, reactivar (confirmar que llega el
+    correo con la contraseña nueva) y eliminar. Es el único paso que puede
+    confirmar el formato real de `connectionString` (de donde salen host y
+    puerto) y que la emulación de desactivar/reactivar se comporta como se
+    espera. Ninguna de las dos cosas se pudo verificar en la sesión que
+    escribió el código: sin SDK de .NET y sin salida de red hacia ese dominio.
+12. **Ejecutar `sql/2026-08-12-mongo-external-ref.sql`** en la BD real antes de
+    desplegar la sesión 18. Sin ese script toda creación de Mongo falla al
+    guardar la referencia externa. Idempotente, se puede correr varias veces.
+13. **Mover `Provisioning:Mongo:Remote:ApiKey` a variable de entorno**
+    (`Provisioning__Mongo__Remote__ApiKey`), igual que el resto de secretos
+    (`bugs.md` ítem 3). Hoy quedó en `appsettings.json` junto a los demás.
+14. **Decidir el destino de las bases Mongo anteriores a la migración.** Viven
+    en el servidor Mongo propio y no existen en la API externa: con
+    `Provisioning:Mongo:Remote:Enabled=true` sus operaciones de ciclo de vida
+    fallan con un 409 explicativo. Hay que migrarlas o darlas de baja; cuando no
+    quede ninguna se puede borrar `Provisioners/MongoProvisioner.cs` y
+    `Provisioning:Mongo:AdminConnectionString`.

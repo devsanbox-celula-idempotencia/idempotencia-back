@@ -57,6 +57,30 @@ if (string.IsNullOrWhiteSpace(builder.Configuration["Provisioning:IpVps"]))
         "conectarse a sus bases de datos. En local usar \"localhost\".");
 }
 
+// MongoDB delegado en la API externa del equipo. Se enlaza siempre; el
+// interruptor Enabled decide cuál de los dos provisioners de Mongo se registra
+// más abajo.
+builder.Services.Configure<RemoteMongoSettings>(
+    builder.Configuration.GetSection(RemoteMongoSettings.SectionName));
+
+var remoteMongo = builder.Configuration
+    .GetSection(RemoteMongoSettings.SectionName)
+    .Get<RemoteMongoSettings>() ?? new RemoteMongoSettings();
+
+// Mismo criterio que Provisioning:IpVps y Dns:ApiToken: se falla al arrancar y
+// no en la primera petición del usuario. Una API key vacía acá no produce un
+// error obvio —produce un 502 en mitad de una creación, con la reserva del
+// catálogo ya hecha y revertida— así que es exactamente el tipo de fallo que
+// conviene adelantar al despliegue.
+if (remoteMongo.Enabled && string.IsNullOrWhiteSpace(remoteMongo.ApiKey))
+{
+    throw new InvalidOperationException(
+        "Provisioning:Mongo:Remote:Enabled está en true pero falta " +
+        "Provisioning:Mongo:Remote:ApiKey. Configúrala (preferiblemente por " +
+        "variable de entorno Provisioning__Mongo__Remote__ApiKey) o pon Enabled " +
+        "en false para volver al provisioner local de MongoDB.");
+}
+
 // ---------------------------------------------------------------------------
 // DNS (Cloudflare). Mismo criterio de validación al arrancar que Provisioning:
 // IpVps y Cors:AllowedOrigins — sin estas claves el servicio de subdominios no
@@ -134,7 +158,44 @@ builder.Services.AddScoped<IDatabaseProvisionerFactory, DatabaseProvisionerFacto
 builder.Services.AddScoped<IDatabaseProvisioner, SqlServerProvisioner>();
 builder.Services.AddScoped<IDatabaseProvisioner, PostgresProvisioner>();
 builder.Services.AddScoped<IDatabaseProvisioner, MySqlProvisioner>();
-builder.Services.AddScoped<IDatabaseProvisioner, MongoProvisioner>();
+
+// El motor "Mongo" tiene DOS implementaciones y se registra exactamente una: el
+// factory resuelve por la propiedad Engine, así que registrar ambas dejaría la
+// elección al orden de la colección de DI —invisible y frágil—.
+//
+// La activa es la API externa del equipo; el provisioner local con driver nativo
+// queda como camino de vuelta (Enabled=false) y como única forma de seguir
+// operando las bases de Mongo creadas antes de la migración, que viven en el
+// servidor propio y no existen en esa API.
+if (remoteMongo.Enabled)
+{
+    // HttpClient tipado por la misma razón que el proveedor de DNS: handler
+    // compartido y reciclado, sin agotar sockets ni quedarse pegado a una IP
+    // vieja. La cabecera de autenticación se pone acá una sola vez.
+    builder.Services.AddHttpClient<IDatabaseProvisioner, RemoteMongoProvisioner>((sp, client) =>
+    {
+        var settings = sp.GetRequiredService<IOptions<RemoteMongoSettings>>().Value;
+
+        // BaseAddress DEBE terminar en "/": si no, Uri descarta el último
+        // segmento al combinar con la ruta relativa. Mismo detalle que ya mordió
+        // en la configuración de Cloudflare.
+        var baseUrl = settings.BaseUrl.EndsWith('/') ? settings.BaseUrl : settings.BaseUrl + "/";
+
+        client.BaseAddress = new Uri(baseUrl);
+        client.DefaultRequestHeaders.Add("X-API-Key", settings.ApiKey);
+        client.DefaultRequestHeaders.Accept.Add(
+            new MediaTypeWithQualityHeaderValue("application/json"));
+
+        // Timeout corto: es una dependencia externa dentro del ciclo de un
+        // request del usuario. Fallar rápido y revertir la reserva es mejor que
+        // dejar la petición colgada hasta el timeout por defecto de 100 segundos.
+        client.Timeout = TimeSpan.FromSeconds(settings.RequestTimeoutSeconds);
+    });
+}
+else
+{
+    builder.Services.AddScoped<IDatabaseProvisioner, MongoProvisioner>();
+}
 
 // Job que mantiene CurrentSizeMB al día contra el tamaño real de cada motor.
 // Es Singleton (todo BackgroundService lo es), así que abre su propio scope de
