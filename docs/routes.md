@@ -15,6 +15,13 @@
 > Revisión posterior: **2026-08-12** — se agregaron `DnsController` (6 rutas
 > bajo `/dns`) y `AdminDnsController` (3 rutas bajo `/admin/dns`, rol `Admin`),
 > más una política de rate limiting nueva (`dns`). Ver hallazgo 13.
+> Revisión posterior: **2026-08-12 (sesión 18)** — MongoDB pasó a aprovisionarse
+> contra la API externa del equipo (`https://mongo.szapatar.dev`). **Ninguna
+> ruta, método, política de auth ni rate limit cambió**; el cambio es interno al
+> provisioner. Sí cambió el *contenido* de dos respuestas para ese motor
+> (`dbName` ahora es el nombre físico que genera esa API, y `reactivate` envía
+> un correo con una contraseña nueva) — documentado en `docs/API.md` secciones
+> 6.1 y 6.5, y en `docs/claude.md` sesión 18.
 > **Este documento debe actualizarse cada vez que cambien las rutas** (ver nota
 > al final y `CLAUDE.md`).
 

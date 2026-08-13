@@ -87,15 +87,23 @@ public class DatabasesController : ControllerBase
     /// <summary>
     /// Restaura el acceso a una BD desactivada (<c>Status = "Inactive"</c>) y
     /// la devuelve a <c>"Active"</c>. Los datos nunca se borraron al
-    /// desactivar, así que la BD vuelve tal cual estaba y con la misma
-    /// contraseña — no hace falta resetearla.
+    /// desactivar, así que la BD vuelve tal cual estaba.
+    ///
+    /// En SqlServer/Postgres/MySQL vuelve con la misma contraseña y no hace
+    /// falta nada más. En MongoDB (aprovisionado contra la API externa del
+    /// equipo) desactivar rota la credencial y la descarta, así que reactivar
+    /// emite una contraseña nueva y se la manda al usuario por correo — por eso
+    /// se le pasa el contacto al servicio. La ruta, el método y la forma de la
+    /// respuesta no cambian.
     /// </summary>
     [HttpPost("{id:int}/reactivate")]
     [EnableRateLimiting("db-provisioning")]
     public async Task<ActionResult<DatabaseDetailResponse>> Reactivate(int id, CancellationToken ct)
     {
         var userId = GetUserId();
-        var detail = await _provisioning.ReactivateAsync(userId, id, ct);
+        var (email, fullName) = GetUserContact();
+
+        var detail = await _provisioning.ReactivateAsync(userId, id, email, fullName, ct);
         return Ok(detail);
     }
 

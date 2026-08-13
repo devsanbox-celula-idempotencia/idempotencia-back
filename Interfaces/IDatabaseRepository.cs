@@ -95,4 +95,27 @@ public interface IDatabaseRepository
     /// </summary>
     Task UpdateDatabaseSizeAsync(
         int databaseId, decimal currentSizeMb, CancellationToken ct = default);
+
+    /// <summary>
+    /// Guarda la referencia con la que un servicio EXTERNO de aprovisionamiento
+    /// conoce esta BD (<c>sp_SetDatabaseExternalRef</c>). Solo se llama para los
+    /// motores delegados en una API ajena; en los locales no hay nada que
+    /// guardar porque el backend direcciona por nombre.
+    ///
+    /// No recibe <c>userId</c> a propósito: es una escritura del sistema dentro
+    /// del mismo flujo que ya validó la propiedad al reservar, igual que
+    /// <see cref="UpdateDatabaseSizeAsync"/>.
+    /// </summary>
+    Task SetDatabaseExternalRefAsync(
+        int databaseId, string externalId, string? externalDbName, CancellationToken ct = default);
+
+    /// <summary>
+    /// Lee la referencia externa de una BD del usuario
+    /// (<c>sp_GetDatabaseExternalRef</c>). Devuelve un objeto con ambos campos
+    /// en <c>null</c> cuando la BD no la administra ningún servicio externo —el
+    /// caso de los cuatro motores locales— y <c>null</c> si la BD no existe o no
+    /// es del usuario.
+    /// </summary>
+    Task<ExternalDatabaseRef?> GetDatabaseExternalRefAsync(
+        int databaseId, int userId, CancellationToken ct = default);
 }

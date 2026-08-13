@@ -103,7 +103,7 @@ public class MySqlProvisioner : IDatabaseProvisioner
         return new ProvisionResult(_host, _port);
     }
 
-    public async Task DropAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task DropAsync(string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         await using var conn = new MySqlConnection(_adminConnectionString);
         await conn.OpenAsync(ct);
@@ -112,16 +112,23 @@ public class MySqlProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"DROP USER IF EXISTS {QuoteLiteral(login)}@'%'", ct);
     }
 
-    public async Task ChangePasswordAsync(string dbName, string login, string newPassword, CancellationToken ct = default)
+    public async Task<CredentialRotationResult?> ChangePasswordAsync(
+        string dbName, string login, string newPassword, string? externalId,
+        CancellationToken ct = default)
     {
         await using var conn = new MySqlConnection(_adminConnectionString);
         await conn.OpenAsync(ct);
 
         var user = $"{QuoteLiteral(login)}@'%'";
         await ExecAsync(conn, $"ALTER USER {user} IDENTIFIED BY {QuoteLiteral(newPassword)}", ct);
+
+        // Este provisioner SÍ aplica la contraseña que recibe, así que no hay
+        // nada nuevo que devolver: null significa "quedó vigente la que me
+        // pasaste". Ver CredentialRotationResult.
+        return null;
     }
 
-    public async Task DeactivateAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task DeactivateAsync(string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         await using var conn = new MySqlConnection(_adminConnectionString);
         await conn.OpenAsync(ct);
@@ -132,7 +139,8 @@ public class MySqlProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"ALTER USER {user} ACCOUNT LOCK", ct);
     }
 
-    public async Task ReactivateAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task<CredentialRotationResult?> ReactivateAsync(
+        string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         await using var conn = new MySqlConnection(_adminConnectionString);
         await conn.OpenAsync(ct);
@@ -142,6 +150,11 @@ public class MySqlProvisioner : IDatabaseProvisioner
         // sobre la BD (GRANT ... ON db.*) nunca se revocaron, así que
         // desbloquear la cuenta deja al usuario como estaba.
         await ExecAsync(conn, $"ALTER USER {user} ACCOUNT UNLOCK", ct);
+
+        // Este provisioner SÍ aplica la contraseña que recibe, así que no hay
+        // nada nuevo que devolver: null significa "quedó vigente la que me
+        // pasaste". Ver CredentialRotationResult.
+        return null;
     }
 
     public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)

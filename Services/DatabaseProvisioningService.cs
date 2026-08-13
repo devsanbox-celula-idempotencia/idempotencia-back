@@ -12,6 +12,15 @@ namespace idempotencia.Services;
 /// coordina el flujo reservar → crear → confirmar / revertir. También
 /// orquesta el ciclo de vida posterior (detalle, desactivar, eliminar, reset
 /// de contraseña).
+///
+/// <b>Motores locales vs. delegados.</b> Desde que MongoDB se aprovisiona
+/// contra una API externa (ver <see cref="idempotencia.Provisioners.RemoteMongoProvisioner"/>),
+/// este servicio ya no puede asumir dos cosas que antes eran obvias: que la BD
+/// quedó creada con el nombre y la contraseña que él decidió, y que basta el
+/// nombre para volver a operarla. De ahí salen las dos piezas nuevas del flujo
+/// —quedarse con los valores EFECTIVOS que reporta el provisioner, y persistir
+/// y releer la referencia externa— que para los cuatro motores locales son
+/// no-ops, porque ahí el provisioner no reporta nada distinto.
 /// </summary>
 public class DatabaseProvisioningService : IDatabaseProvisioningService
 {
@@ -53,8 +62,16 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         // 2. Reserva en el catálogo: el SP valida cuota/límites y genera nombres.
         var reservation = await _repo.ReserveDatabaseAsync(userId, engine, dbName, ct);
 
-        // 3. Contraseña generada en el backend (solo se devuelve una vez).
+        // 3. Contraseña generada en el backend (solo se devuelve una vez). En los
+        // motores delegados en una API externa es solo una propuesta: si esa API
+        // genera la suya, la que vale es la que ella devuelve.
         var password = PasswordGenerator.Generate();
+
+        // Declarado FUERA del try para que la reversión del catch lo vea. Si la
+        // creación externa llegó a completarse y lo que falló fue el paso
+        // siguiente, este id es lo único con lo que se puede borrar la base que
+        // quedó viva del otro lado.
+        string? externalId = null;
 
         try
         {
@@ -63,8 +80,29 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
                 reservation.DbName, reservation.LoginName, password, reservation.MaxStorageMB,
                 effectiveMaxConcurrentConnections, ct);
 
-            // 5. Confirma en el catálogo y guarda el HASH de la contraseña.
-            var passwordHash = BCrypt.Net.BCrypt.HashPassword(password);
+            externalId = result.ExternalId;
+
+            // 4b. Valores EFECTIVOS: lo que realmente quedó creado, que no
+            // siempre es lo que se pidió. Los provisioners locales devuelven
+            // null en los dos y esto se resuelve a la reserva de siempre.
+            var effectiveDbName = result.EffectiveDbName ?? reservation.DbName;
+            var effectivePassword = result.EffectivePassword ?? password;
+
+            // 4c. Persistir la referencia externa ANTES de confirmar. El orden
+            // importa: si esta escritura falla, el catch de abajo todavía puede
+            // borrar la base en la API (tiene el id en memoria) y revertir la
+            // reserva. Al revés —confirmar primero— una falla acá dejaría una
+            // base confirmada y viva, imposible de eliminar desde Colmena
+            // porque nadie sabría su id.
+            if (externalId is not null)
+            {
+                await _repo.SetDatabaseExternalRefAsync(
+                    reservation.DatabaseId, externalId, result.EffectiveDbName, ct);
+            }
+
+            // 5. Confirma en el catálogo y guarda el HASH de la contraseña que
+            // quedó realmente vigente (no la propuesta, que en Mongo se descarta).
+            var passwordHash = BCrypt.Net.BCrypt.HashPassword(effectivePassword);
             await _repo.ConfirmDatabaseAsync(reservation.DatabaseId, passwordHash, ct);
 
             // Cadenas de conexión ya armadas para el usuario (con el parámetro de
@@ -72,21 +110,27 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
             // que ya tenemos, así que va después de confirmar: si algo falló antes,
             // no hay conexión que entregar. Ver docs/bugs.md ítem 28.
             var clientConn = provisioner.BuildClientConnection(
-                reservation.DbName, reservation.LoginName, password);
+                effectiveDbName, reservation.LoginName, effectivePassword);
 
             return new CreateDatabaseResponse
             {
                 DatabaseId = reservation.DatabaseId,
                 Engine = engine,
-                DbName = reservation.DbName,
+                // Se reporta el nombre EFECTIVO y no el del catálogo: es al que
+                // el usuario tiene que conectarse. Cuando difieren, el del
+                // catálogo es un identificador interno que no le sirve de nada.
+                DbName = effectiveDbName,
                 Status = "Active",
                 MaxStorageMB = reservation.MaxStorageMB,
                 MaxConcurrentConnections = effectiveMaxConcurrentConnections,
                 Host = result.Host,
                 Port = result.Port,
                 LoginName = reservation.LoginName,
-                Password = password,
-                ConnectionUri = clientConn.Uri,
+                Password = effectivePassword,
+                // Se prefiere la cadena que devuelve el propio servicio que creó
+                // la base: es la única correcta por construcción.
+                // BuildClientConnection es la reconstrucción de respaldo.
+                ConnectionUri = result.ConnectionUri ?? clientConn.Uri,
                 JdbcUrl = clientConn.JdbcUrl
             };
         }
@@ -98,7 +142,7 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
 
             try
             {
-                await provisioner.DropAsync(reservation.DbName, reservation.LoginName, ct);
+                await provisioner.DropAsync(reservation.DbName, reservation.LoginName, externalId, ct);
             }
             catch (Exception cleanupEx)
             {
@@ -122,18 +166,16 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
     public async Task<DatabaseDetailResponse> GetDetailAsync(
         int userId, int databaseId, CancellationToken ct = default)
     {
-        var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)
-            ?? throw new NotFoundException("Base de datos no encontrada.");
+        var (detail, externalRef) = await LoadAsync(userId, databaseId, ct);
 
         var provisioner = _factory.Get(detail.Engine);
-        return MapToDetailResponse(detail, provisioner);
+        return MapToDetailResponse(detail, provisioner, externalRef);
     }
 
     public async Task<DatabaseDetailResponse> DeactivateAsync(
         int userId, int databaseId, CancellationToken ct = default)
     {
-        var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)
-            ?? throw new NotFoundException("Base de datos no encontrada.");
+        var (detail, externalRef) = await LoadAsync(userId, databaseId, ct);
 
         if (!string.Equals(detail.Status, "Active", StringComparison.OrdinalIgnoreCase))
             throw new AppException(
@@ -145,19 +187,21 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         // Revoca el acceso físico PRIMERO; si esto falla, el catálogo sigue
         // reflejando la realidad (la BD sigue Active) en vez de quedar
         // desincronizado.
-        await provisioner.DeactivateAsync(detail.DbName, detail.LoginName, ct);
+        await provisioner.DeactivateAsync(
+            PhysicalName(detail, externalRef), detail.LoginName, externalRef?.ExternalId, ct);
+
         await _repo.DeactivateDatabaseAsync(databaseId, userId, ct);
 
         detail.Status = "Inactive";
         detail.PausedAt = DateTime.UtcNow;
-        return MapToDetailResponse(detail, provisioner);
+        return MapToDetailResponse(detail, provisioner, externalRef);
     }
 
     public async Task<DatabaseDetailResponse> ReactivateAsync(
-        int userId, int databaseId, CancellationToken ct = default)
+        int userId, int databaseId, string userEmail, string userFullName,
+        CancellationToken ct = default)
     {
-        var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)
-            ?? throw new NotFoundException("Base de datos no encontrada.");
+        var (detail, externalRef) = await LoadAsync(userId, databaseId, ct);
 
         if (!string.Equals(detail.Status, "Inactive", StringComparison.OrdinalIgnoreCase))
             throw new AppException(
@@ -181,20 +225,35 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         // Con este orden, si falla el catálogo lo que queda es una BD
         // físicamente habilitada pero marcada 'Inactive': el usuario todavía ve
         // el botón, vuelve a pulsarlo, y como ReactivateAsync es idempotente en
-        // los cuatro motores el reintento se completa limpio. Es el estado
-        // desincronizado recuperable de los dos.
-        await provisioner.ReactivateAsync(detail.DbName, detail.LoginName, ct);
+        // los cuatro motores locales el reintento se completa limpio. Es el
+        // estado desincronizado recuperable de los dos.
+        var rotated = await provisioner.ReactivateAsync(
+            PhysicalName(detail, externalRef), detail.LoginName, externalRef?.ExternalId, ct);
+
         await _repo.ReactivateDatabaseAsync(databaseId, userId, ct);
 
         detail.Status = "Active";
         detail.PausedAt = null;
-        return MapToDetailResponse(detail, provisioner);
+
+        // Motores que no pueden devolver el acceso con la contraseña de siempre
+        // (hoy solo Mongo, por la API externa) emiten una nueva al reactivar.
+        // Hay que persistir su hash y hacérsela llegar al usuario, o quedaría
+        // con una BD "Active" a la que no puede entrar.
+        if (rotated is not null)
+        {
+            await PersistAndNotifyRotationAsync(
+                userId, detail, provisioner, rotated, externalRef, userEmail, userFullName,
+                subject: $"Colmena — tu base de datos {PhysicalName(detail, externalRef)} volvió a estar activa",
+                buildBody: EmailTemplates.DatabaseReactivatedCredentials,
+                ct: ct);
+        }
+
+        return MapToDetailResponse(detail, provisioner, externalRef);
     }
 
     public async Task DeleteAsync(int userId, int databaseId, CancellationToken ct = default)
     {
-        var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)
-            ?? throw new NotFoundException("Base de datos no encontrada.");
+        var (detail, externalRef) = await LoadAsync(userId, databaseId, ct);
 
         if (!string.Equals(detail.Status, "Inactive", StringComparison.OrdinalIgnoreCase))
             throw new AppException(
@@ -206,15 +265,16 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
 
         // Borrado físico real (irreversible). Se marca en el catálogo recién
         // después de que el motor confirme el borrado.
-        await provisioner.DropAsync(detail.DbName, detail.LoginName, ct);
+        await provisioner.DropAsync(
+            PhysicalName(detail, externalRef), detail.LoginName, externalRef?.ExternalId, ct);
+
         await _repo.MarkDatabaseDeletedAsync(databaseId, userId, ct);
     }
 
     public async Task ResetPasswordAsync(
         int userId, int databaseId, string userEmail, string userFullName, CancellationToken ct = default)
     {
-        var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)
-            ?? throw new NotFoundException("Base de datos no encontrada.");
+        var (detail, externalRef) = await LoadAsync(userId, databaseId, ct);
 
         if (!string.Equals(detail.Status, "Active", StringComparison.OrdinalIgnoreCase))
             throw new AppException(
@@ -226,31 +286,99 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
 
         // Cambia la contraseña física PRIMERO; si falla, la contraseña
         // anterior sigue siendo la válida y no se toca el catálogo.
-        await provisioner.ChangePasswordAsync(detail.DbName, detail.LoginName, newPassword, ct);
+        var rotated = await provisioner.ChangePasswordAsync(
+            PhysicalName(detail, externalRef), detail.LoginName, newPassword,
+            externalRef?.ExternalId, ct);
 
-        var passwordHash = BCrypt.Net.BCrypt.HashPassword(newPassword);
-        await _repo.ResetDatabasePasswordAsync(databaseId, userId, passwordHash, ct);
-
-        // El correo es la ÚNICA forma en que el usuario recibe esta
-        // contraseña — a propósito no se devuelve en la respuesta HTTP (no
-        // queda en logs de acceso/historial del navegador). Si el envío
-        // falla, SÍ se propaga la excepción (mapea a 500 genérico): la
-        // contraseña física ya cambió, así que el usuario debe enterarse de
-        // que algo salió mal para poder reintentar o contactar soporte, en
-        // vez de quedarse bloqueado sin saberlo.
-        var subject = $"Colmena — nueva contraseña para {detail.DbName}";
-        var body = EmailTemplates.DatabasePasswordReset(
-            detail, newPassword,
-            provisioner.BuildClientConnection(detail.DbName, detail.LoginName, newPassword));
-        await _email.SendAsync(userEmail, userFullName, subject, body, ct);
+        // rotated no nulo = el motor impuso su propia contraseña (API externa) y
+        // la que se generó arriba nunca existió. Guardar el hash de la propuesta
+        // dejaría al usuario con una credencial que no valida jamás.
+        await PersistAndNotifyRotationAsync(
+            userId, detail, provisioner,
+            rotated ?? new CredentialRotationResult(newPassword, null),
+            externalRef, userEmail, userFullName,
+            subject: $"Colmena — nueva contraseña para {PhysicalName(detail, externalRef)}",
+            buildBody: EmailTemplates.DatabasePasswordReset,
+            ct: ct);
     }
 
+    /// <summary>
+    /// Guarda el hash de una contraseña recién rotada y se la envía al usuario.
+    /// Compartido por el reset explícito y por la reactivación de los motores
+    /// que no pueden devolver el acceso con la contraseña anterior.
+    ///
+    /// El correo es la ÚNICA forma en que el usuario recibe esta contraseña — a
+    /// propósito no se devuelve en la respuesta HTTP (no queda en logs de
+    /// acceso/historial del navegador). Si el envío falla, SÍ se propaga la
+    /// excepción (mapea a 500 genérico): la contraseña física ya cambió, así que
+    /// el usuario debe enterarse de que algo salió mal para poder reintentar o
+    /// contactar soporte, en vez de quedarse bloqueado sin saberlo.
+    /// </summary>
+    private async Task PersistAndNotifyRotationAsync(
+        int userId,
+        ProvisionedDatabaseDetail detail,
+        IDatabaseProvisioner provisioner,
+        CredentialRotationResult rotated,
+        ExternalDatabaseRef? externalRef,
+        string userEmail,
+        string userFullName,
+        string subject,
+        Func<ProvisionedDatabaseDetail, string, ClientConnectionInfo, string> buildBody,
+        CancellationToken ct)
+    {
+        var passwordHash = BCrypt.Net.BCrypt.HashPassword(rotated.Password);
+        await _repo.ResetDatabasePasswordAsync(detail.DatabaseId, userId, passwordHash, ct);
+
+        // Igual que al crear: si el servicio externo devolvió su propia cadena,
+        // esa manda sobre la que reconstruye el provisioner.
+        var built = provisioner.BuildClientConnection(
+            PhysicalName(detail, externalRef), detail.LoginName, rotated.Password);
+
+        var conn = rotated.ConnectionUri is null
+            ? built
+            : new ClientConnectionInfo(rotated.ConnectionUri, built.JdbcUrl);
+
+        await _email.SendAsync(
+            userEmail, userFullName, subject, buildBody(detail, rotated.Password, conn), ct);
+    }
+
+    /// <summary>
+    /// Lee el detalle de la BD y, en la misma operación, su referencia externa.
+    /// Todos los flujos del ciclo de vida la necesitan, así que se cargan
+    /// juntas en vez de repetir el par de llamadas en cada método.
+    /// </summary>
+    private async Task<(ProvisionedDatabaseDetail Detail, ExternalDatabaseRef? ExternalRef)> LoadAsync(
+        int userId, int databaseId, CancellationToken ct)
+    {
+        var detail = await _repo.GetDatabaseDetailAsync(databaseId, userId, ct)
+            ?? throw new NotFoundException("Base de datos no encontrada.");
+
+        var externalRef = await _repo.GetDatabaseExternalRefAsync(databaseId, userId, ct);
+
+        return (detail, externalRef);
+    }
+
+    /// <summary>
+    /// Nombre con el que el provisioner tiene que dirigirse a la BD en su motor.
+    /// Para los cuatro motores locales es el del catálogo; para una BD creada
+    /// por un servicio externo es el que ESE servicio generó, que no coincide.
+    /// Usar el del catálogo ahí apuntaría a una base que no existe.
+    /// </summary>
+    private static string PhysicalName(
+        ProvisionedDatabaseDetail detail, ExternalDatabaseRef? externalRef) =>
+        string.IsNullOrWhiteSpace(externalRef?.ExternalDbName)
+            ? detail.DbName
+            : externalRef.ExternalDbName!;
+
     private static DatabaseDetailResponse MapToDetailResponse(
-        ProvisionedDatabaseDetail detail, IDatabaseProvisioner provisioner) => new()
+        ProvisionedDatabaseDetail detail, IDatabaseProvisioner provisioner,
+        ExternalDatabaseRef? externalRef) => new()
     {
         DatabaseId = detail.DatabaseId,
         Engine = detail.Engine,
-        DbName = detail.DbName,
+        // Mismo criterio que en la creación: se muestra el nombre al que el
+        // usuario realmente se conecta, no el identificador interno del catálogo.
+        DbName = PhysicalName(detail, externalRef),
         Status = detail.Status,
         Host = provisioner.Host,
         Port = provisioner.Port,

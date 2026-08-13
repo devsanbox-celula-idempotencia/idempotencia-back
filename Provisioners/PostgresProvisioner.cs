@@ -91,7 +91,7 @@ public class PostgresProvisioner : IDatabaseProvisioner
         return new ProvisionResult(_host, _port);
     }
 
-    public async Task DropAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task DropAsync(string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         await using var conn = new NpgsqlConnection(_adminConnectionString);
         await conn.OpenAsync(ct);
@@ -100,16 +100,23 @@ public class PostgresProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"DROP ROLE IF EXISTS {QuoteIdentifier(login)}", ct);
     }
 
-    public async Task ChangePasswordAsync(string dbName, string login, string newPassword, CancellationToken ct = default)
+    public async Task<CredentialRotationResult?> ChangePasswordAsync(
+        string dbName, string login, string newPassword, string? externalId,
+        CancellationToken ct = default)
     {
         await using var conn = new NpgsqlConnection(_adminConnectionString);
         await conn.OpenAsync(ct);
 
         await ExecAsync(conn,
             $"ALTER ROLE {QuoteIdentifier(login)} WITH PASSWORD {QuoteLiteral(newPassword)}", ct);
+
+        // Este provisioner SÍ aplica la contraseña que recibe, así que no hay
+        // nada nuevo que devolver: null significa "quedó vigente la que me
+        // pasaste". Ver CredentialRotationResult.
+        return null;
     }
 
-    public async Task DeactivateAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task DeactivateAsync(string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         await using var conn = new NpgsqlConnection(_adminConnectionString);
         await conn.OpenAsync(ct);
@@ -119,7 +126,8 @@ public class PostgresProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"ALTER ROLE {QuoteIdentifier(login)} NOLOGIN", ct);
     }
 
-    public async Task ReactivateAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task<CredentialRotationResult?> ReactivateAsync(
+        string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         await using var conn = new NpgsqlConnection(_adminConnectionString);
         await conn.OpenAsync(ct);
@@ -128,6 +136,11 @@ public class PostgresProvisioner : IDatabaseProvisioner
         // propiedad de la BD y todos sus privilegios; solo se le devuelve la
         // capacidad de iniciar sesión.
         await ExecAsync(conn, $"ALTER ROLE {QuoteIdentifier(login)} LOGIN", ct);
+
+        // Este provisioner SÍ aplica la contraseña que recibe, así que no hay
+        // nada nuevo que devolver: null significa "quedó vigente la que me
+        // pasaste". Ver CredentialRotationResult.
+        return null;
     }
 
     public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)

@@ -378,6 +378,18 @@ repetirse en bucle.
 > (`Provisioning:{Engine}:RequireTls`): hoy MySQL y SqlServer sí, Postgres y
 > Mongo todavía no.
 
+> **`dbName` en Mongo (2026-08-12)** — el `dbName` de la respuesta **no es el
+> que se envió en el request**. Desde esta fecha las bases de Mongo las crea la
+> API de aprovisionamiento del equipo, que genera su propio nombre físico
+> aleatorio; el backend devuelve ese, que es al que el usuario realmente se
+> conecta, y `GET /databases/{id}` reporta el mismo. El nombre que el usuario
+> escribió sigue siendo la etiqueta con la que pidió la base, no un
+> identificador. En los otros tres motores no cambia nada: sigue siendo el
+> nombre con prefijo por usuario que genera el catálogo.
+>
+> Para la UI: no asumas que `dbName` de la respuesta coincide con el del
+> formulario. Muestra siempre el de la respuesta.
+
 > `maxConcurrentConnections` en la respuesta es el valor **efectivamente
 > aplicado** (ya acotado al cap), puede diferir de lo pedido. Vale `0` en
 > SqlServer/Mongo porque ahí no se aplica.
@@ -395,6 +407,7 @@ repetirse en bucle.
 | `401` | Token ausente, inválido o expirado | — (respuesta estándar de `[Authorize]`) |
 | `401` | Token válido pero sin claim `UserId` legible | `"El token no contiene un identificador de usuario válido."` |
 | `429` | Más de 5 creaciones/min de este usuario | `"Demasiadas solicitudes. Inténtalo más tarde."` |
+| `502` | Solo Mongo: la API externa de aprovisionamiento falló, rechazó nuestra API key o respondió incompleta — el backend revierte la reserva automáticamente | `"El servicio de MongoDB respondió con un error (...)"` |
 | `500` | Falla la creación física en el motor (credenciales admin mal configuradas, motor caído, etc.) — el backend revierte la reserva automáticamente | `"Ocurrió un error al procesar la solicitud."` o `"Ocurrió un error inesperado."` según el tipo de excepción; nunca el detalle interno |
 
 ### 6.2 Listar mis bases de datos
@@ -536,14 +549,27 @@ JWT Bearer · rate limit `db-provisioning` (5/min/usuario)
 Deshace la desactivación: restaura el acceso del login/usuario en el motor y
 devuelve la BD a `Active`. Requiere que esté `Inactive`.
 
-Lo importante para la UI: **los datos y la contraseña siguen siendo los
-mismos**. Desactivar nunca borró nada, solo revocó la conexión, así que después
-de reactivar el estudiante se conecta con exactamente las mismas credenciales
-que ya tenía. No le ofrezcas resetear la contraseña como parte de este flujo.
+Lo importante para la UI: **los datos siguen intactos** — desactivar nunca
+borró nada, solo revocó la conexión.
+
+Lo que pasa con la **contraseña** depende del motor, y desde 2026-08-12 ya no
+es igual en los cuatro:
+
+- **SqlServer, Postgres, MySQL:** vuelve la contraseña de siempre. El
+  estudiante se conecta con exactamente las mismas credenciales que ya tenía y
+  no recibe ningún correo. No le ofrezcas resetear la contraseña en este flujo.
+- **Mongo:** se emite una contraseña **nueva** y le llega **por correo**. La
+  base de Mongo se aprovisiona contra la API externa del equipo, que no tiene
+  un "desactivar" propio: desactivar se implementa rotando la credencial y
+  descartándola, así que la anterior es irrecuperable por diseño. Después de
+  reactivar, avísale que revise su correo — la respuesta HTTP no trae la
+  contraseña (mismo criterio que la sección 6.7).
 
 Es **reintentable sin riesgo**: si la llamada falla a mitad de camino, volver a
-pulsar el botón completa la operación (los cuatro motores tratan la
-reactivación como idempotente).
+pulsar el botón completa la operación. En los tres motores locales es
+idempotente; en Mongo cada reintento emite otra contraseña e invalida la
+anterior, pero el estado final siempre es "la base es alcanzable con la última
+contraseña enviada".
 
 **Respuesta `200 OK`:** el mismo shape que la sección 6.3, con
 `"status": "Active"` y `pausedAt` en `null`.
@@ -554,7 +580,14 @@ reactivación como idempotente).
 | `401` | Falta el token, es inválido o expiró | — |
 | `404` | El `id` no existe o no es del usuario | `"Base de datos no encontrada."` |
 | `400` | La BD no está `Inactive` (sigue activa, o ya fue eliminada) | `"Solo se puede reactivar una base de datos que esté inactiva."` |
+| `409` | Solo Mongo: la BD se creó antes de la migración a la API externa y no tiene identificador ahí | `"La base de datos '<nombre>' no tiene un identificador en la API de MongoDB..."` |
+| `502` | Solo Mongo: la API externa de aprovisionamiento falló o rechazó nuestras credenciales | `"El servicio de MongoDB respondió con un error (...)"` |
 | `429` | Más de 5 solicitudes/min de este usuario (comparte el límite con `POST /databases`) | `"Demasiadas solicitudes. Inténtalo más tarde."` |
+
+> Los `502` de Mongo no son culpa del usuario: preséntalos como "el servicio de
+> bases de datos no está disponible, inténtalo en un momento", no como un error
+> de sus datos. Aplican igual a crear, desactivar, reactivar, eliminar y
+> resetear contraseña de ese motor.
 
 > Qué botón mostrar según `status`: con `"Active"` van "Desactivar" y
 > "Eliminar" deshabilitado; con `"Inactive"` van **"Reactivar"** y "Eliminar"
