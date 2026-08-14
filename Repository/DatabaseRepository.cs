@@ -150,7 +150,8 @@ public class DatabaseRepository : IDatabaseRepository
     }
 
     public async Task SetDatabaseExternalRefAsync(
-        int databaseId, string externalId, string? externalDbName, CancellationToken ct = default)
+        int databaseId, string externalId, string? externalDbName, string? externalLoginName,
+        int? externalMaxStorageMb, CancellationToken ct = default)
     {
         var pDatabaseId = new SqlParameter("@DatabaseId", System.Data.SqlDbType.Int) { Value = databaseId };
         var pExternalId = new SqlParameter("@ExternalId", System.Data.SqlDbType.NVarChar, 100)
@@ -166,9 +167,22 @@ public class DatabaseRepository : IDatabaseRepository
             Value = (object?)externalDbName ?? DBNull.Value
         };
 
+        var pExternalLoginName = new SqlParameter("@ExternalLoginName", System.Data.SqlDbType.NVarChar, 128)
+        {
+            Value = (object?)externalLoginName ?? DBNull.Value
+        };
+        var pExternalMaxStorageMb = new SqlParameter("@ExternalMaxStorageMB", System.Data.SqlDbType.Int)
+        {
+            Value = (object?)externalMaxStorageMb ?? DBNull.Value
+        };
+
         await _db.Database.ExecuteSqlRawAsync(
-            "EXEC sp_SetDatabaseExternalRef @DatabaseId, @ExternalId, @ExternalDbName",
-            new object[] { pDatabaseId, pExternalId, pExternalDbName }, ct);
+            "EXEC sp_SetDatabaseExternalRef @DatabaseId, @ExternalId, @ExternalDbName, " +
+            "@ExternalLoginName, @ExternalMaxStorageMB",
+            new object[]
+            {
+                pDatabaseId, pExternalId, pExternalDbName, pExternalLoginName, pExternalMaxStorageMb
+            }, ct);
     }
 
     public async Task<ExternalDatabaseRef?> GetDatabaseExternalRefAsync(

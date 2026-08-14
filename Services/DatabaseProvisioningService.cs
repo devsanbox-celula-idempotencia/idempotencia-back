@@ -13,11 +13,13 @@ namespace idempotencia.Services;
 /// orquesta el ciclo de vida posterior (detalle, desactivar, eliminar, reset
 /// de contraseña).
 ///
-/// <b>Motores locales vs. delegados.</b> Desde que MongoDB se aprovisiona
-/// contra una API externa (ver <see cref="idempotencia.Provisioners.RemoteMongoProvisioner"/>),
+/// <b>Motores locales vs. delegados.</b> Desde que MongoDB y MySQL se
+/// aprovisionan contra APIs externas (ver
+/// <see cref="idempotencia.Provisioners.RemoteMongoProvisioner"/> y
+/// <see cref="idempotencia.Provisioners.RemoteMySqlProvisioner"/>),
 /// este servicio ya no puede asumir dos cosas que antes eran obvias: que la BD
-/// quedó creada con el nombre y la contraseña que él decidió, y que basta el
-/// nombre para volver a operarla. De ahí salen las dos piezas nuevas del flujo
+/// quedó creada con el nombre, el usuario y la contraseña que él decidió, y que
+/// basta el nombre para volver a operarla. De ahí salen las dos piezas nuevas del flujo
 /// —quedarse con los valores EFECTIVOS que reporta el provisioner, y persistir
 /// y releer la referencia externa— que para los cuatro motores locales son
 /// no-ops, porque ahí el provisioner no reporta nada distinto.
@@ -83,10 +85,17 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
             externalId = result.ExternalId;
 
             // 4b. Valores EFECTIVOS: lo que realmente quedó creado, que no
-            // siempre es lo que se pidió. Los provisioners locales devuelven
-            // null en los dos y esto se resuelve a la reserva de siempre.
+            // siempre es lo que se pidió. Los provisioners locales los devuelven
+            // todos en null y esto se resuelve a la reserva de siempre.
             var effectiveDbName = result.EffectiveDbName ?? reservation.DbName;
+            var effectiveLogin = result.EffectiveLogin ?? reservation.LoginName;
             var effectivePassword = result.EffectivePassword ?? password;
+
+            // La cuota que se le reporta al usuario es la que REALMENTE lo va a
+            // frenar. Cuando la fija el servicio externo (MySQL socio: 20 MB), la
+            // del catálogo es un número que no gobierna nada y mostrarlo haría que
+            // su base se bloquee sin explicación.
+            var effectiveMaxStorageMb = result.ExternalMaxStorageMB ?? reservation.MaxStorageMB;
 
             // 4c. Persistir la referencia externa ANTES de confirmar. El orden
             // importa: si esta escritura falla, el catch de abajo todavía puede
@@ -97,11 +106,13 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
             if (externalId is not null)
             {
                 await _repo.SetDatabaseExternalRefAsync(
-                    reservation.DatabaseId, externalId, result.EffectiveDbName, ct);
+                    reservation.DatabaseId, externalId, result.EffectiveDbName,
+                    result.EffectiveLogin, result.ExternalMaxStorageMB, ct);
             }
 
             // 5. Confirma en el catálogo y guarda el HASH de la contraseña que
-            // quedó realmente vigente (no la propuesta, que en Mongo se descarta).
+            // quedó realmente vigente (no la propuesta, que en los motores
+            // delegados se descarta).
             var passwordHash = BCrypt.Net.BCrypt.HashPassword(effectivePassword);
             await _repo.ConfirmDatabaseAsync(reservation.DatabaseId, passwordHash, ct);
 
@@ -110,7 +121,7 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
             // que ya tenemos, así que va después de confirmar: si algo falló antes,
             // no hay conexión que entregar. Ver docs/bugs.md ítem 28.
             var clientConn = provisioner.BuildClientConnection(
-                effectiveDbName, reservation.LoginName, effectivePassword);
+                effectiveDbName, effectiveLogin, effectivePassword);
 
             return new CreateDatabaseResponse
             {
@@ -121,11 +132,14 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
                 // catálogo es un identificador interno que no le sirve de nada.
                 DbName = effectiveDbName,
                 Status = "Active",
-                MaxStorageMB = reservation.MaxStorageMB,
+                MaxStorageMB = effectiveMaxStorageMb,
                 MaxConcurrentConnections = effectiveMaxConcurrentConnections,
                 Host = result.Host,
                 Port = result.Port,
-                LoginName = reservation.LoginName,
+                // Mismo criterio que DbName: el usuario que se reporta es con el
+                // que el estudiante realmente se autentica, no el que reservó el
+                // catálogo. La API socia de MySQL genera el suyo con su prefijo.
+                LoginName = effectiveLogin,
                 Password = effectivePassword,
                 // Se prefiere la cadena que devuelve el propio servicio que creó
                 // la base: es la única correcta por construcción.
@@ -188,7 +202,8 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         // reflejando la realidad (la BD sigue Active) en vez de quedar
         // desincronizado.
         await provisioner.DeactivateAsync(
-            PhysicalName(detail, externalRef), detail.LoginName, externalRef?.ExternalId, ct);
+            PhysicalName(detail, externalRef), PhysicalLogin(detail, externalRef),
+            externalRef?.ExternalId, ct);
 
         await _repo.DeactivateDatabaseAsync(databaseId, userId, ct);
 
@@ -228,7 +243,8 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         // los cuatro motores locales el reintento se completa limpio. Es el
         // estado desincronizado recuperable de los dos.
         var rotated = await provisioner.ReactivateAsync(
-            PhysicalName(detail, externalRef), detail.LoginName, externalRef?.ExternalId, ct);
+            PhysicalName(detail, externalRef), PhysicalLogin(detail, externalRef),
+            externalRef?.ExternalId, ct);
 
         await _repo.ReactivateDatabaseAsync(databaseId, userId, ct);
 
@@ -266,7 +282,8 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         // Borrado físico real (irreversible). Se marca en el catálogo recién
         // después de que el motor confirme el borrado.
         await provisioner.DropAsync(
-            PhysicalName(detail, externalRef), detail.LoginName, externalRef?.ExternalId, ct);
+            PhysicalName(detail, externalRef), PhysicalLogin(detail, externalRef),
+            externalRef?.ExternalId, ct);
 
         await _repo.MarkDatabaseDeletedAsync(databaseId, userId, ct);
     }
@@ -287,7 +304,7 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         // Cambia la contraseña física PRIMERO; si falla, la contraseña
         // anterior sigue siendo la válida y no se toca el catálogo.
         var rotated = await provisioner.ChangePasswordAsync(
-            PhysicalName(detail, externalRef), detail.LoginName, newPassword,
+            PhysicalName(detail, externalRef), PhysicalLogin(detail, externalRef), newPassword,
             externalRef?.ExternalId, ct);
 
         // rotated no nulo = el motor impuso su propia contraseña (API externa) y
@@ -332,7 +349,7 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         // Igual que al crear: si el servicio externo devolvió su propia cadena,
         // esa manda sobre la que reconstruye el provisioner.
         var built = provisioner.BuildClientConnection(
-            PhysicalName(detail, externalRef), detail.LoginName, rotated.Password);
+            PhysicalName(detail, externalRef), PhysicalLogin(detail, externalRef), rotated.Password);
 
         var conn = rotated.ConnectionUri is null
             ? built
@@ -370,6 +387,19 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
             ? detail.DbName
             : externalRef.ExternalDbName!;
 
+    /// <summary>
+    /// Usuario con el que el provisioner tiene que dirigirse al motor, y con el
+    /// que el estudiante se autentica. Análogo de <see cref="PhysicalName"/>: en
+    /// los motores locales y en Mongo es el del catálogo (esos servicios aceptan
+    /// el nombre que se les manda); en la API socia de MySQL no, porque su
+    /// endpoint de creación no lleva cuerpo y el usuario lo genera ella.
+    /// </summary>
+    private static string PhysicalLogin(
+        ProvisionedDatabaseDetail detail, ExternalDatabaseRef? externalRef) =>
+        string.IsNullOrWhiteSpace(externalRef?.ExternalLoginName)
+            ? detail.LoginName
+            : externalRef.ExternalLoginName!;
+
     private static DatabaseDetailResponse MapToDetailResponse(
         ProvisionedDatabaseDetail detail, IDatabaseProvisioner provisioner,
         ExternalDatabaseRef? externalRef) => new()
@@ -382,8 +412,10 @@ public class DatabaseProvisioningService : IDatabaseProvisioningService
         Status = detail.Status,
         Host = provisioner.Host,
         Port = provisioner.Port,
-        LoginName = detail.LoginName,
-        MaxStorageMB = detail.MaxStorageMB,
+        LoginName = PhysicalLogin(detail, externalRef),
+        // Igual que al crear: manda la cuota que realmente aplica el servicio
+        // que hospeda la base, no la que reservó el catálogo.
+        MaxStorageMB = externalRef?.ExternalMaxStorageMB ?? detail.MaxStorageMB,
         CurrentSizeMB = detail.CurrentSizeMB,
         LastActivityAt = detail.LastActivityAt,
         CreatedAt = detail.CreatedAt,

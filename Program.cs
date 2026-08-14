@@ -57,6 +57,57 @@ if (string.IsNullOrWhiteSpace(builder.Configuration["Provisioning:IpVps"]))
         "conectarse a sus bases de datos. En local usar \"localhost\".");
 }
 
+// Separación catálogo / aprovisionamiento de SQL Server. Son dos servidores
+// distintos desde 2026-08-14: el catálogo (tablas y SPs de control) sigue en
+// ConnectionStrings:Colmena, y las bases de los estudiantes se crean en la
+// instancia del proveedor (Provisioning:SqlServer:AdminConnectionString).
+//
+// Se valida acá y no en el provisioner porque un fallo de esta configuración no
+// se nota: sin la clave, la versión anterior caía en silencio a la cadena del
+// catálogo y creaba las bases de los estudiantes dentro del servidor de control.
+// Mejor no arrancar.
+var sqlServerAdmin = builder.Configuration["Provisioning:SqlServer:AdminConnectionString"];
+
+if (string.IsNullOrWhiteSpace(sqlServerAdmin))
+{
+    throw new InvalidOperationException(
+        "Falta Provisioning:SqlServer:AdminConnectionString: la cadena del servidor donde se " +
+        "crean las bases de los estudiantes. Ya no se reusa ConnectionStrings:Colmena como " +
+        "respaldo — son dos servidores distintos y mezclarlos es justo lo que se quiso evitar.");
+}
+
+// Coincidencia exacta con la del catálogo: no se falla (un ambiente local puede
+// tener todo junto a propósito) pero se avisa fuerte, porque en despliegue casi
+// siempre significa que alguien copió la clave equivocada.
+if (string.Equals(sqlServerAdmin, builder.Configuration.GetConnectionString("Colmena"),
+        StringComparison.OrdinalIgnoreCase))
+{
+    Console.WriteLine(
+        "[ADVERTENCIA] Provisioning:SqlServer:AdminConnectionString es idéntica a " +
+        "ConnectionStrings:Colmena: las bases de los estudiantes se van a crear en el mismo " +
+        "servidor que el catálogo. Correcto solo en un ambiente local; en despliegue revisa " +
+        "la configuración.");
+}
+
+// MySQL delegado en la API de la célula socia. Mismo patrón que el bloque de
+// Mongo de abajo: se enlaza siempre y el interruptor Enabled decide cuál de los
+// dos provisioners se registra.
+builder.Services.Configure<RemoteMySqlSettings>(
+    builder.Configuration.GetSection(RemoteMySqlSettings.SectionName));
+
+var remoteMySql = builder.Configuration
+    .GetSection(RemoteMySqlSettings.SectionName)
+    .Get<RemoteMySqlSettings>() ?? new RemoteMySqlSettings();
+
+if (remoteMySql.Enabled && string.IsNullOrWhiteSpace(remoteMySql.ApiKey))
+{
+    throw new InvalidOperationException(
+        "Provisioning:MySql:Remote:Enabled está en true pero falta " +
+        "Provisioning:MySql:Remote:ApiKey. Configúrala (preferiblemente por " +
+        "variable de entorno Provisioning__MySql__Remote__ApiKey) o pon Enabled " +
+        "en false para volver al provisioner local de MySQL.");
+}
+
 // MongoDB delegado en la API externa del equipo. Se enlaza siempre; el
 // interruptor Enabled decide cuál de los dos provisioners de Mongo se registra
 // más abajo.
@@ -157,7 +208,42 @@ builder.Services.AddScoped<IDatabaseProvisioningService, DatabaseProvisioningSer
 builder.Services.AddScoped<IDatabaseProvisionerFactory, DatabaseProvisionerFactory>();
 builder.Services.AddScoped<IDatabaseProvisioner, SqlServerProvisioner>();
 builder.Services.AddScoped<IDatabaseProvisioner, PostgresProvisioner>();
-builder.Services.AddScoped<IDatabaseProvisioner, MySqlProvisioner>();
+
+// El motor "MySql" tiene DOS implementaciones y se registra exactamente una,
+// por el mismo motivo que Mongo (el factory resuelve por Engine, así que
+// registrar ambas dejaría la elección al orden de la colección de DI).
+//
+// Cuidado adicional al revertir: MySQL es el motor que se aprovisiona solo en
+// el primer login por OAuth, así que este interruptor decide dónde nacen las
+// bases de todos los usuarios nuevos.
+if (remoteMySql.Enabled)
+{
+    builder.Services.AddHttpClient<IDatabaseProvisioner, RemoteMySqlProvisioner>((sp, client) =>
+    {
+        var settings = sp.GetRequiredService<IOptions<RemoteMySqlSettings>>().Value;
+
+        // BaseAddress DEBE terminar en "/": si no, Uri descarta el último
+        // segmento al combinar con la ruta relativa.
+        var baseUrl = settings.BaseUrl.EndsWith('/') ? settings.BaseUrl : settings.BaseUrl + "/";
+
+        client.BaseAddress = new Uri(baseUrl);
+
+        // Bearer, no X-API-Key: es el esquema que exige la célula socia. No
+        // tiene nada que ver con el JWT que este backend le emite a SUS
+        // usuarios — son dos credenciales en direcciones opuestas que solo
+        // comparten el nombre del header.
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", settings.ApiKey);
+        client.DefaultRequestHeaders.Accept.Add(
+            new MediaTypeWithQualityHeaderValue("application/json"));
+
+        client.Timeout = TimeSpan.FromSeconds(settings.RequestTimeoutSeconds);
+    });
+}
+else
+{
+    builder.Services.AddScoped<IDatabaseProvisioner, MySqlProvisioner>();
+}
 
 // El motor "Mongo" tiene DOS implementaciones y se registra exactamente una: el
 // factory resuelve por la propiedad Engine, así que registrar ambas dejaría la
