@@ -1453,6 +1453,61 @@ una transacción larga, que es un modo de falla peor que el espacio que ocupa.
 
 ---
 
+### 31. El proveedor bloquea `DROP DATABASE` por SQL: no podemos borrar bases de SQL Server
+**Estado:** 🔵 Conocido / mitigado en código; la purga física queda manual.
+**Tipo:** Restricción del entorno (no es un bug nuestro) + su efecto colateral.
+**Dónde:** [`Provisioners/SqlServerProvisioner.cs`](../Provisioners/SqlServerProvisioner.cs) — `DropAsync` y `CreateAsync`.
+**Problema:** la instancia de Raft Consensus tiene un **trigger DDL** que cancela
+cualquier `DROP DATABASE` ejecutado por SQL:
+
+```
+Operación cancelada: No tienes permisos para borrar la base de datos por SQL.
+Por favor utiliza el panel de Raft.
+The transaction ended in the trigger. The batch has been aborted.
+```
+
+No aparece en ninguno de los dos documentos que entregó el proveedor
+(`credencialesidempotencia.pdf` dice explícitamente que el login puede "gestionar
+completamente su propia base de datos"). Se descubrió en la primera prueba real
+de creación, sesión 21.
+
+Rompe dos supuestos del provisioner:
+
+1. **La reversión de una creación fallida no puede limpiar.** La BD queda viva y
+   el catálogo sin registro.
+2. **`DELETE /databases/{id}` no puede cumplir su contrato** ("borrado físico
+   real, irreversible").
+
+Y tiene un efecto en cascada: como `sp_ReserveDatabase` genera el mismo nombre
+para el mismo (usuario, etiqueta), **todo reintento choca con
+`Database ... already exists` (error 1801) para siempre**, hasta que alguien
+purgue la base a mano.
+
+**Decisiones tomadas (confirmadas con el usuario):**
+
+- `DropAsync` **revoca el acceso primero** (`DROP LOGIN`, que sí está permitido)
+  y solo después intenta el borrado físico. Si el trigger lo cancela, se
+  registra un ERROR con el nombre exacto a purgar y **no se propaga**: el
+  catálogo marca la base como eliminada y el endpoint sigue devolviendo 204. Sin
+  login nadie puede conectarse, así que los datos quedan inaccesibles aunque el
+  archivo siga ocupando espacio.
+- Se restaura `MULTI_USER` si el borrado falla. El `SET SINGLE_USER WITH ROLLBACK
+  IMMEDIATE` previo corre en su propia transacción implícita y el rollback del
+  trigger NO lo deshace: sin esa restauración la base quedaría aceptando una sola
+  conexión, peor que el estado inicial.
+- La colisión de nombres devuelve **409 con un mensaje accionable** (purgar desde
+  el panel o elegir otro nombre) en vez del "ya existe" crudo. Se descartó
+  agregar un sufijo automático: ocultaría el problema y el servidor acumularía
+  bases huérfanas en silencio.
+
+**Pendiente:** pedirle a Raft que exceptúe a `idempotencia_login` del trigger, o
+que exponga un endpoint de borrado. Mientras tanto, cada base de SQL Server
+eliminada desde Colmena deja un archivo que alguien tiene que purgar desde su
+panel — conviene revisar el log periódicamente buscando "No se pudo borrar
+físicamente la BD". Contacto: consensusraft@gmail.com.
+
+---
+
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
@@ -1492,3 +1547,4 @@ una transacción larga, que es un modo de falla peor que el espacio que ocupa.
 | 28 | Conectarse a MySQL exigía activar `allowPublicKeyRetrieval` a mano, y las credenciales podían viajar sin cifrar por el puerto público | 🔴 Alta (seguridad) + 🟠 Media (usabilidad) | 🟡 Implementado (`SslMode=Required`, `REQUIRE SSL`, `connectionUri`/`jdbcUrl`); falta compilar, desplegar y correr el backfill. Postgres/Mongo siguen sin TLS |
 | 29 | Todos los secretos (JWT, `sa`, Cloudflare, Gmail, las 2 API keys, OAuth) quedan dentro de la imagen Docker: `.dockerignore` no excluye `appsettings.json` | 🔴 Alta (seguridad) | 🔴 Abierto — el fix rompe el despliegue actual hasta que los secretos salgan del archivo (decisión: se quedan por ahora, sesión 21) |
 | 30 | `CREATE DATABASE ... ON PRIMARY (...)` sin `FILENAME` → error 1036: ninguna base de SQL Server se podía crear | 🔴 Alta (motor completo inutilizable) | 🟡 Corregido (CREATE + ALTER MODIFY FILE); falta confirmar en vivo |
+| 31 | Raft bloquea `DROP DATABASE` por SQL con un trigger DDL: no se pueden borrar bases de SQL Server, y los reintentos chocan con el nombre para siempre | 🟠 Media (restricción externa; el acceso sí se revoca) | 🔵 Mitigado en código; falta negociar la excepción con el proveedor |
