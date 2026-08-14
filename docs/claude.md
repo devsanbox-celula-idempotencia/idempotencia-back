@@ -1218,6 +1218,219 @@ Mongo) y este archivo.
 
 ---
 
+## Sesión 19 — 2026-08-12 (MySQL pasa a aprovisionarse contra la API de la célula socia)
+
+**Pedido original:** integrar la API de aprovisionamiento MySQL de la célula
+socia (`https://api.aba.andrescortes.dev`, API key de célula vía
+`Authorization: Bearer`), **sin cambiar los endpoints ni la forma de consumo ya
+establecida**. Misma consigna que la sesión 18 con Mongo, y se reusó toda la
+maquinaria que aquella dejó montada (`ProvisionResult` con valores efectivos,
+referencia externa en el catálogo, emulación de desactivar/reactivar).
+
+**Lo que esta API impone, y es más duro que el caso de Mongo:**
+
+1. **`POST /partners/databases` no lleva cuerpo.** No se puede proponer ni el
+   nombre de la base ni el del usuario: los genera ella con el prefijo de la
+   célula (`alpha_7f3a9c1e2b` / `alpha_7f3a9c1e`), junto con la contraseña. El
+   `LoginName` del catálogo deja de ser el usuario real — algo que con Mongo no
+   pasaba, porque ahí sí se le manda el `username`.
+2. **La cuota la fija el socio** (20 MB) y es la que realmente pausa la base.
+3. **Rate limit de 10 de ráfaga con recarga de 1 cada 2 minutos, POR CÉLULA** —
+   unos 30 requests/hora para todo el backend. Es la restricción que más decidió
+   el diseño, porque **cada alta por OAuth ya consume uno**
+   (`AuthService.EnsureMySqlDatabaseAsync` crea una BD MySQL en el primer login).
+
+**Decisiones tomadas (confirmadas con el usuario antes de escribir código):**
+
+- **No medir el tamaño desde el `DatabaseSizeMonitor`.** Es la decisión menos
+  obvia del cambio y conviene dejarla escrita: esta API *sí* expone
+  `espacioUtilizadoMB`, a diferencia de la de Mongo. Pero el monitor recorre
+  todas las bases activas cada 15 minutos, y medir una por una agotaría los ~30
+  requests/hora en el primer ciclo, devolviendo 429 a los usuarios que intentan
+  crear su base. `GetSizeMbAsync` devuelve `-1` y el catálogo conserva el último
+  valor conocido. Se evaluó y se descartó (por ahora) un snapshot de
+  `GET /partners/databases` cacheado por ciclo — queda en el backlog.
+- **Guardar la cuota real del socio por base** (`ExternalMaxStorageMB`) y
+  reportarla en vez de la del catálogo. Sale de configuración y no de la API:
+  la respuesta de creación no la trae, y consultarla obligaría a un `GET` extra
+  por cada base creada — el doble de consumo en el camino más caliente.
+- **Emular desactivar/reactivar rotando credenciales**, igual que Mongo.
+
+**Qué se hizo:**
+
+- [`Provisioners/RemoteMySqlProvisioner.cs`](../Provisioners/RemoteMySqlProvisioner.cs)
+  — nuevo. `HttpClient` tipado con `Authorization: Bearer`. Traduce los códigos
+  del socio a algo que signifique algo para NUESTRO usuario: `401` → 502 (es
+  nuestra API key, no su sesión), `409` (límite de 500 bases de la célula) → 503
+  con mensaje de "no hay cupo", `422`/`503` → 503 reintentable, `429` → 429 tal
+  cual (esperar y reintentar sí es la acción correcta). El `404` del endpoint de
+  rotación recibe trato especial: incluye el caso de una base **PAUSADA** por
+  cuota, que desde el catálogo se ve `Active`, así que se traduce a un mensaje
+  que menciona el espacio en vez de un "no encontrada" sobre algo que el usuario
+  está viendo en pantalla.
+- [`Services/RemoteMySqlSettings.cs`](../Services/RemoteMySqlSettings.cs) —
+  nuevo, sección `Provisioning:MySql:Remote`. Incluye `RequestsPerHourHint`, una
+  clave puramente documental que deja constancia del presupuesto de rate limit
+  con el que hay que diseñar cualquier llamada nueva.
+- [`Models/ProvisionResult.cs`](../Models/ProvisionResult.cs) — dos campos
+  opcionales más: `EffectiveLogin` y `ExternalMaxStorageMB`.
+- [`Models/ExternalDatabaseRef.cs`](../Models/ExternalDatabaseRef.cs) — dos
+  columnas más: `ExternalLoginName` y `ExternalMaxStorageMB`.
+- [`Services/DatabaseProvisioningService.cs`](../Services/DatabaseProvisioningService.cs)
+  — helper `PhysicalLogin` (hermano de `PhysicalName` de la sesión 18) usado en
+  los cinco puntos donde antes iba `detail.LoginName`, y la cuota efectiva
+  reportada en crear y en detalle.
+- [`sql/2026-08-12-partner-mysql-external-ref.sql`](../sql/2026-08-12-partner-mysql-external-ref.sql)
+  — nuevo y **autosuficiente**: crea las cuatro columnas externas (las dos del
+  script de Mongo incluidas) y redefine los dos SPs en su forma final. Se puede
+  correr antes, después o en vez del script de Mongo. Los dos parámetros nuevos
+  de `sp_SetDatabaseExternalRef` van con `DEFAULT NULL`. Idempotente.
+- [`Program.cs`](../Program.cs) — mismo patrón que Mongo: se registra
+  exactamente uno de los dos provisioners de MySQL según
+  `Provisioning:MySql:Remote:Enabled`, y se valida al arrancar que si está
+  encendido haya API key.
+- [`Provisioners/MySqlProvisioner.cs`](../Provisioners/MySqlProvisioner.cs) — se
+  conserva como camino de vuelta. Pesa más que el caso de Mongo: es el motor del
+  auto-aprovisionamiento por OAuth, así que las bases que quedan en el servidor
+  propio son las de **todos** los usuarios registrados hasta la migración.
+
+**Cambio de comportamiento visible para el frontend** (la forma de las
+respuestas NO cambia, el contenido sí — y ahora afecta al flujo de registro):
+
+- `POST /databases` con `engine: "MySql"` devuelve `dbName` **y `loginName`**
+  generados por el socio. Lo mismo el `mySqlDatabase` que viaja en la respuesta
+  del login OAuth: es la misma ruta de código.
+- `maxStorageMB` pasa a ser la cuota del socio (20) en vez de la del catálogo.
+- `currentSizeMB` de las bases MySQL se congela en su último valor conocido.
+- Aparecen `429` y `503` donde antes solo había `500`.
+
+**Pendiente al cierre:**
+
+1. **No se compiló ni se probó contra la API**, por lo mismo que en la sesión 18
+   (sin SDK de .NET y sin salida de red hacia ese dominio desde el entorno de
+   trabajo). Falta `dotnet build` y un ciclo completo en vivo.
+2. **Ejecutar `sql/2026-08-12-partner-mysql-external-ref.sql`** antes de
+   desplegar. Reemplaza al de Mongo, no hace falta correr los dos.
+3. **Mover la API key a variable de entorno** (`Provisioning__MySql__Remote__ApiKey`).
+   El propio documento del socio lo marca como no negociable.
+4. **Confirmar con el equipo socio si el motor expone TLS.** Hoy
+   `Provisioning:MySql:Remote:RequireTls` arranca en `false` (no controlamos ese
+   servidor y exigir TLS contra un motor sin certificado dejaría a los usuarios
+   sin conectarse). Si lo tiene, subirlo a `true` le ahorra al usuario el paso
+   manual de `allowPublicKeyRetrieval` — ver `bugs.md` ítem 28.
+5. **Vigilar el rate limit en el alta masiva.** Una clase entera entrando por
+   OAuth a la vez son 1 request por usuario contra un presupuesto de 10 de
+   ráfaga. `EnsureMySqlDatabaseAsync` no tumba el login si falla (devuelve
+   `mySqlDatabase = null`), pero esos usuarios se quedan sin base y hoy no hay
+   reintento automático.
+
+**Documentos actualizados:** `docs/routes.md`, `docs/API.md` y este archivo.
+
+---
+
+## Sesión 20 — 2026-08-14 (las bases de SQL Server se mudan al servidor de Raft Consensus)
+
+**Pedido original:** empezar a aprovisionar las bases de los usuarios en el
+servidor SQL Server que entregó Raft Consensus, **manteniendo la lógica en la
+base de datos que se usa hoy**, con los dos lados separados y sin romper nada ni
+cambiar los endpoints.
+
+**Lo que entregó el proveedor** (documentos `credencialesidempotencia.pdf` y
+`usuariosfinalesidempotencia.pdf`, 11/08/2026):
+
+- Instancia `49.13.85.216:1433`, base `idempotencia_db`, login
+  `idempotencia_login`, SQL Server 2022.
+- Ese login puede crear bases, crear logins y asignar permisos por su cuenta.
+  **No es `sa`**: tiene los permisos justos, no roles de servidor completos.
+
+**La separación, en una línea:** el catálogo —tablas y SPs de control— se queda
+exactamente donde estaba (`ConnectionStrings:Colmena`, instancia propia,
+`master`); lo único que se mudó es dónde nacen las bases de los estudiantes
+(`Provisioning:SqlServer:AdminConnectionString`). Cierra la mitad de SqlServer
+del ítem 3 del backlog (sacar el aprovisionamiento de `master`); el catálogo
+sigue en `master` y ese ítem queda abierto.
+
+**Qué se hizo:**
+
+- [`Provisioners/SqlServerProvisioner.cs`](../Provisioners/SqlServerProvisioner.cs)
+  — cuatro cambios, tres de ellos por dejar de ser dueños del servidor:
+
+  1. **La cadena de administración pasa a ser obligatoria.** Antes, si faltaba,
+     se caía a `ConnectionStrings:Colmena`. Con las dos apuntando a la misma
+     instancia eso era inofensivo; ahora ese respaldo silencioso crearía las
+     bases de los estudiantes DENTRO del servidor del catálogo —mezclando justo
+     lo que se separó— sin que nada fallara. Se prefiere no arrancar.
+  2. **`DENY VIEW ANY DATABASE` ahora va dentro de `EXEC('USE master; ...')`.**
+     Es un permiso de ámbito servidor y SQL Server solo los acepta con `master`
+     como base actual. Funcionaba porque la cadena admin apuntaba a `master`;
+     con `Database=idempotencia_db` habría fallado en la primera creación. El SP
+     de ejemplo del proveedor hace lo mismo por esta razón exacta.
+  3. **Ese `DENY` ya no aborta la creación si falla.** Exige permisos de ámbito
+     servidor que el proveedor pudo no habernos concedido. Se registra como
+     ERROR con un mensaje accionable y se sigue: la alternativa es que nadie
+     pueda crear una base de SQL Server hasta negociar el permiso, y eso es peor
+     que un login pudiendo LISTAR nombres de bases a las que no puede entrar. Se
+     apaga con `Provisioning:SqlServer:DenyViewAnyDatabase=false`.
+  4. **Host público propio** (`Provisioning:SqlServer:PublicHost`), con caída a
+     `Provisioning:IpVps`. SQL Server ya no corre en el VPS, así que el host que
+     se le entrega al estudiante no puede seguir siendo el común a todos.
+
+  De paso, dos endurecimientos que el cambio de servidor volvió más relevantes:
+
+  - `GetSizeMbAsync` **distingue "no existe" de "no la puedo ver"**. Antes las
+    dos daban `0`. Con un login que no es `sa`, un permiso corto sobre
+    `sys.master_files` habría hecho que el job pisara con ceros el tamaño real
+    de todas las bases. Ahora devuelve `0` solo si `DB_ID` es NULL y `-1`
+    ("no medible", el job conserva el último valor) si existe pero no reporta.
+  - Los identificadores que viajan dentro del literal de un `EXEC('...')` pasan
+    por `EscapeForDynamicSql`. Son dos capas de parseo y `QuoteIdentifier` solo
+    cubre una; hoy ni el catálogo ni el regex del DTO dejan pasar comillas, así
+    que es defensa en profundidad — pero ahora sobre un servidor ajeno.
+
+- [`Program.cs`](../Program.cs) — falla al arrancar si falta la cadena de
+  aprovisionamiento, y avisa por consola si es **idéntica** a la del catálogo
+  (no falla: un ambiente local puede tener todo junto a propósito, pero en
+  despliegue casi siempre significa que alguien copió la clave equivocada).
+
+- `appsettings.json` — `Provisioning:SqlServer` apunta al servidor de Raft y
+  gana `PublicHost` y `DenyViewAnyDatabase`. `ConnectionStrings:Colmena` **no se
+  tocó**.
+
+**Decisiones tomadas (confirmadas con el usuario):**
+
+- **DDL directo desde el backend, no un SP en `idempotencia_db`.** El proveedor
+  recomienda mover la creación a un SP suyo, y encajaría con el enfoque
+  database-centric del proyecto; se descartó por ahora para no sumar una
+  migración más en un servidor que todavía no se ha probado. El provisioner ya
+  cita identificadores y escapa la contraseña como literal. Queda en el backlog.
+- **No se soportan las bases de SQL Server creadas en el servidor viejo.** El
+  provisioner apunta solo al nuevo, así que borrar o resetear una base anterior
+  fallaría. Se asumió que SqlServer casi no se había usado todavía; si no fuera
+  así, hay que darlas de baja antes de desplegar.
+
+**Cambio de comportamiento visible para el frontend:** `host` de las bases
+SqlServer pasa de `100.99.206.50` a `49.13.85.216`. La forma de la respuesta no
+cambia, pero las cadenas de conexión de bases creadas antes del despliegue
+quedan apuntando al servidor viejo.
+
+**Pendiente al cierre:**
+
+1. **No se compiló ni se probó contra el servidor nuevo** (sin SDK de .NET en el
+   entorno de trabajo y sin salida de red hacia esa IP). El punto más frágil es
+   si `idempotencia_login` tiene permiso para el `DENY VIEW ANY DATABASE` y para
+   leer `sys.master_files`: los dos casos están manejados sin tumbar nada, pero
+   hay que mirar los logs de la primera creación real.
+2. **Mover la contraseña de `idempotencia_login` a variable de entorno**
+   (`Provisioning__SqlServer__AdminConnectionString`), igual que el resto de
+   secretos — `bugs.md` ítem 3.
+3. **Confirmar la cuota de disco del servidor.** El `MAXSIZE` de cada base sale
+   de `MaxStorageMB` del catálogo; nadie ha validado que la suma quepa en el
+   disco que asignó Raft.
+
+**Documentos actualizados:** `docs/routes.md`, `docs/API.md` y este archivo.
+
+---
+
 ## Backlog / próximos pasos
 
 1. **Redesplegar el backend actual a QA** para que lleguen los fixes ya
@@ -1329,3 +1542,32 @@ SSO documentado como comportamiento esperado (ítem 23).
     fallan con un 409 explicativo. Hay que migrarlas o darlas de baja; cuando no
     quede ninguna se puede borrar `Provisioners/MongoProvisioner.cs` y
     `Provisioning:Mongo:AdminConnectionString`.
+
+15. **Vigilar el consumo de rate limit de la API de la célula socia (MySQL)**
+    tras el despliegue de la sesión 19: 10 de ráfaga y recarga de 1 cada 2
+    minutos POR CÉLULA, con cada alta por OAuth consumiendo uno. Si el alta
+    masiva empieza a devolver 429, las salidas son pedir ampliación al socio o
+    encolar/reintentar el aprovisionamiento del primer login en vez de hacerlo
+    sincrónico.
+16. **Reponer la medición de tamaño de MySQL vía snapshot**, si el dato hace
+    falta en el dashboard: una sola llamada a `GET /partners/databases` por
+    ciclo del `DatabaseSizeMonitor`, cacheada en memoria en un singleton y
+    compartida por todas las mediciones de ese ciclo (4 requests/hora en vez de
+    N). Se descartó en la sesión 19 por simplicidad, no por inviabilidad.
+17. **Reflejar el estado PAUSADA del socio en el catálogo.** Hoy una base MySQL
+    que superó su cuota queda bloqueada para escritura del lado del motor pero
+    Colmena la sigue mostrando `Active`, y el usuario solo se entera cuando le
+    falla un INSERT (o cuando intenta resetear la contraseña y recibe el mensaje
+    de cuota). Encaja con el ítem 8 de este backlog (estado `'OverQuota'` en
+    `CK_ProvDb_Status`), que ya estaba pedido para el caso local.
+
+18. **Evaluar mover la creación de bases de SQL Server a un SP dentro de
+    `idempotencia_db`**, como recomienda Raft Consensus en su guía de usuarios
+    finales y como pide el enfoque database-centric del proyecto. Hoy el
+    provisioner ejecuta el DDL directo (con identificadores citados y la
+    contraseña como literal escapado). Se pospuso en la sesión 20 para no sumar
+    una migración en un servidor sin probar.
+19. **Dar de baja o migrar las bases de SQL Server del servidor viejo.** Desde
+    la sesión 20 el provisioner solo habla con la instancia de Raft, así que
+    cualquier base anterior quedó fuera de alcance: eliminarla o resetearle la
+    contraseña desde Colmena falla. Se asumió que no había ninguna en uso real.

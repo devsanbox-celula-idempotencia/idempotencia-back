@@ -7,12 +7,25 @@ using MySqlConnector;
 namespace idempotencia.Provisioners;
 
 /// <summary>
-/// Provisioner de MySQL/MariaDB. Crea la base de datos, un usuario accesible
+/// Provisioner de MySQL/MariaDB contra un servidor MySQL PROPIO, hablado con el
+/// driver nativo. Crea la base de datos, un usuario accesible
 /// desde cualquier host ('%') y le concede privilegios ÚNICAMENTE sobre esa
 /// base (GRANT ... ON db.*, nunca ON *.*). La cuota de tamaño no es nativa por
 /// BD, por lo que <paramref name="maxStorageMb"/> no se aplica aquí (ver
 /// docs/bugs.md — pendiente: job de monitoreo de tamaño real). El límite de
 /// conexiones concurrentes sí es nativo (MAX_USER_CONNECTIONS) y se aplica.
+///
+/// <b>Desde 2026-08-12 no es la implementación activa por defecto.</b> El motor
+/// "MySql" pasó a aprovisionarse contra la API de la célula socia
+/// (<see cref="RemoteMySqlProvisioner"/>), que es la que se registra en DI
+/// cuando <c>Provisioning:MySql:Remote:Enabled</c> está en <c>true</c>. Esta
+/// clase se conserva —y se mantiene compilando— para poder volver atrás
+/// poniendo esa clave en <c>false</c>, sin más cambios que reiniciar: es la
+/// única forma de seguir operando las bases de MySQL creadas ANTES de la
+/// migración, que viven en el servidor propio y no existen en la API socia.
+/// Pesa más que el caso de Mongo: MySQL es el motor que se aprovisiona
+/// automáticamente en el primer login por OAuth, así que estas bases son las de
+/// TODOS los usuarios registrados hasta la migración.
 /// </summary>
 public class MySqlProvisioner : IDatabaseProvisioner
 {

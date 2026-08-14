@@ -1356,6 +1356,62 @@ Nada en el backend estaba forzando ese cifrado:
 
 ---
 
+### 29. Todos los secretos del backend quedan horneados dentro de la imagen Docker
+**Estado:** 🔴 Abierto (decisión pendiente, ver más abajo).
+**Tipo:** Seguridad (exposición de credenciales).
+**Dónde:** [`Dockerfile`](../Dockerfile) (`COPY . ./`) + [`.dockerignore`](../.dockerignore).
+**Problema:** `.dockerignore` excluye `bin/`, `obj/`, `.git/` y los archivos de
+IDE, pero **no `appsettings.json`**. Como el Dockerfile hace `COPY . ./` antes
+de `dotnet publish`, ese archivo entra en la etapa de build y su copia publicada
+queda en la imagen final. Hoy eso significa que cualquiera que pueda hacer `pull`
+de la imagen —o `docker run ... cat appsettings.json`, sin siquiera arrancar la
+app— lee en texto plano:
+
+- la contraseña de `sa` del servidor del catálogo,
+- las credenciales de `idempotencia_login` en el servidor de Raft Consensus,
+- las contraseñas de root de MySQL y Postgres, y la de admin de Mongo,
+- el token de Cloudflare (permite crear/borrar registros DNS de la zona),
+- la API key de la célula socia y la del servicio de Mongo,
+- la App Password de Gmail,
+- la clave de firma de los JWT (permite fabricar tokens de cualquier usuario),
+- los `ClientSecret` de Google y GitHub.
+
+`appsettings.json` está en `.gitignore`, así que **no** viaja al repositorio: la
+fuga es específica de la imagen. Es la razón por la que el archivo estar ignorado
+en git da una falsa sensación de que los secretos están contenidos.
+
+**Por qué no se corrigió de una:** agregar `appsettings.json` al `.dockerignore`
+es una línea, pero **rompería el despliegue actual**. El backend no lee variables
+de entorno para estos valores hoy: toda la configuración vive en ese archivo, así
+que un contenedor sin él ni siquiera arranca (`Program.cs` falla al validar
+`Provisioning:IpVps`). El fix real es mover los secretos fuera del archivo, y esa
+decisión la tomó el usuario en la sesión 21: **por ahora se quedan en
+`appsettings.json`**.
+
+**Solución propuesta (cuando se decida abordarlo):**
+1. Agregar `appsettings.json` a `.dockerignore`.
+2. Pasar los secretos por variables de entorno con el separador de doble guion
+   bajo de .NET, que las mapea sobre las mismas claves sin tocar código:
+   `ConnectionStrings__Colmena`, `Jwt__Key`, `Dns__ApiToken`,
+   `Email__Password`, `Authentication__Google__ClientSecret`,
+   `Authentication__GitHub__ClientSecret`,
+   `Provisioning__SqlServer__AdminConnectionString`,
+   `Provisioning__Postgres__AdminConnectionString`,
+   `Provisioning__MySql__AdminConnectionString`,
+   `Provisioning__MySql__Remote__ApiKey`,
+   `Provisioning__Mongo__AdminConnectionString`,
+   `Provisioning__Mongo__Remote__ApiKey`.
+3. Dejar en `appsettings.json` solo lo no sensible (puertos, hosts públicos,
+   flags, URLs base) y versionarlo como plantilla.
+4. En desarrollo local, User Secrets (`dotnet user-secrets`) o
+   `appsettings.Development.json`, que ya está en `.gitignore`.
+
+**Mitigación mientras tanto:** tratar la imagen como si fuera el archivo de
+secretos — registro privado, sin publicarla, y rotar todo lo de arriba si alguna
+vez estuvo en un registro accesible.
+
+---
+
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
@@ -1393,3 +1449,4 @@ Nada en el backend estaba forzando ese cifrado:
 | 26 | Desactivar era un camino sin retorno: faltaba `POST /databases/{id}/reactivate` pese a que los datos nunca se borran | 🟠 Media (pérdida de acceso evitable por un clic del usuario) | 🟡 Implementado (`sp_ReactivateDatabase` + endpoint); falta ejecutar el script SQL, compilar y desplegar |
 | 27 | El `host` entregado al usuario salía de `Provisioning:{Engine}:Host` (en Docker, el nombre del contenedor) y caía a `localhost` en silencio si faltaba | 🔴 Alta (credenciales inservibles desde fuera del servidor, sin señal de error) | 🟢 Resuelto en código + config (`Provisioning:IpVps` + validación al arrancar); falta compilar y desplegar |
 | 28 | Conectarse a MySQL exigía activar `allowPublicKeyRetrieval` a mano, y las credenciales podían viajar sin cifrar por el puerto público | 🔴 Alta (seguridad) + 🟠 Media (usabilidad) | 🟡 Implementado (`SslMode=Required`, `REQUIRE SSL`, `connectionUri`/`jdbcUrl`); falta compilar, desplegar y correr el backfill. Postgres/Mongo siguen sin TLS |
+| 29 | Todos los secretos (JWT, `sa`, Cloudflare, Gmail, las 2 API keys, OAuth) quedan dentro de la imagen Docker: `.dockerignore` no excluye `appsettings.json` | 🔴 Alta (seguridad) | 🔴 Abierto — el fix rompe el despliegue actual hasta que los secretos salgan del archivo (decisión: se quedan por ahora, sesión 21) |

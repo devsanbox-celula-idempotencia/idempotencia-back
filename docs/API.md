@@ -348,12 +348,12 @@ repetirse en bucle.
   "status": "Active",
   "maxStorageMB": 20,
   "maxConcurrentConnections": 10,
-  "host": "100.99.206.50",
+  "host": "49.13.85.216",
   "port": 1433,
   "loginName": "usr_colmena_u12_proyecto_ana",
   "password": "P4ssGeneradaUnaVez",
-  "connectionUri": "Server=100.99.206.50,1433;Database=colmena_u12_proyecto_ana;User Id=usr_colmena_u12_proyecto_ana;Password=P4ssGeneradaUnaVez;Encrypt=True;TrustServerCertificate=True;",
-  "jdbcUrl": "jdbc:sqlserver://100.99.206.50:1433;databaseName=colmena_u12_proyecto_ana;encrypt=true;trustServerCertificate=true"
+  "connectionUri": "Server=49.13.85.216,1433;Database=colmena_u12_proyecto_ana;User Id=usr_colmena_u12_proyecto_ana;Password=P4ssGeneradaUnaVez;Encrypt=True;TrustServerCertificate=True;",
+  "jdbcUrl": "jdbc:sqlserver://49.13.85.216:1433;databaseName=colmena_u12_proyecto_ana;encrypt=true;trustServerCertificate=true"
 }
 ```
 
@@ -378,17 +378,42 @@ repetirse en bucle.
 > (`Provisioning:{Engine}:RequireTls`): hoy MySQL y SqlServer sí, Postgres y
 > Mongo todavía no.
 
-> **`dbName` en Mongo (2026-08-12)** — el `dbName` de la respuesta **no es el
-> que se envió en el request**. Desde esta fecha las bases de Mongo las crea la
-> API de aprovisionamiento del equipo, que genera su propio nombre físico
-> aleatorio; el backend devuelve ese, que es al que el usuario realmente se
-> conecta, y `GET /databases/{id}` reporta el mismo. El nombre que el usuario
-> escribió sigue siendo la etiqueta con la que pidió la base, no un
-> identificador. En los otros tres motores no cambia nada: sigue siendo el
-> nombre con prefijo por usuario que genera el catálogo.
+> **`dbName`, `loginName` y `maxStorageMB` en Mongo y MySQL (2026-08-12)** — en
+> esos dos motores las bases ya no las crea este backend, sino un servicio
+> externo que genera sus propios nombres. Lo que devuelve la respuesta puede no
+> coincidir con lo que se pidió:
 >
-> Para la UI: no asumas que `dbName` de la respuesta coincide con el del
-> formulario. Muestra siempre el de la respuesta.
+> - **`dbName`** — **no es el que se envió en el request**. Mongo genera un
+>   nombre aleatorio; MySQL genera uno con el prefijo de nuestra célula
+>   (`alpha_7f3a9c1e2b`). El backend devuelve el real, que es al que el usuario
+>   se conecta, y `GET /databases/{id}` reporta el mismo. El nombre que el
+>   usuario escribió sigue siendo la etiqueta con la que pidió la base, no un
+>   identificador.
+> - **`loginName`** — solo en **MySQL**: el endpoint del socio no acepta cuerpo,
+>   así que el usuario también lo genera él (`alpha_7f3a9c1e`). En Mongo el
+>   `loginName` sigue siendo el del catálogo.
+> - **`maxStorageMB`** — solo en **MySQL**: es la cuota que aplica el socio
+>   (hoy 20 MB), no la del catálogo. Es la que realmente va a pausar la base, así
+>   que es la que hay que mostrar en cualquier barra de uso.
+>
+> En SqlServer y Postgres no cambia nada: siguen siendo los nombres con prefijo
+> por usuario que genera el catálogo.
+>
+> Para la UI: no asumas que `dbName` ni `loginName` de la respuesta coinciden
+> con los del formulario. Muestra siempre los de la respuesta. Esto vale también
+> para el objeto `mySqlDatabase` que viaja en la respuesta del login OAuth — es
+> la misma ruta de código.
+
+> **`host` de SqlServer (2026-08-14)** — las bases de SQL Server pasaron a
+> crearse en la instancia del proveedor (Raft Consensus): el `host` que devuelve
+> la API es `49.13.85.216`, no la IP del VPS. Los otros motores conservan su
+> propio host. Nada que cambiar en el front —siempre debió tomar `host`/`port` de
+> la respuesta— pero ojo con cualquier valor quemado en configuración o en
+> documentación de soporte.
+>
+> Las bases de SqlServer creadas **antes** de ese despliegue siguen viviendo en
+> el servidor anterior y sus cadenas de conexión guardadas ya no coinciden con lo
+> que reporta la API.
 
 > `maxConcurrentConnections` en la respuesta es el valor **efectivamente
 > aplicado** (ya acotado al cap), puede diferir de lo pedido. Vale `0` en
@@ -407,7 +432,9 @@ repetirse en bucle.
 | `401` | Token ausente, inválido o expirado | — (respuesta estándar de `[Authorize]`) |
 | `401` | Token válido pero sin claim `UserId` legible | `"El token no contiene un identificador de usuario válido."` |
 | `429` | Más de 5 creaciones/min de este usuario | `"Demasiadas solicitudes. Inténtalo más tarde."` |
-| `502` | Solo Mongo: la API externa de aprovisionamiento falló, rechazó nuestra API key o respondió incompleta — el backend revierte la reserva automáticamente | `"El servicio de MongoDB respondió con un error (...)"` |
+| `502` | Mongo/MySQL: la API externa de aprovisionamiento falló, rechazó nuestra API key o respondió incompleta — el backend revierte la reserva automáticamente | `"El servicio de ... respondió con un error (...)"` |
+| `503` | Solo MySQL: no hay cupo de bases en la célula, o el servicio del socio no pudo completar la operación. Reintentable en unos minutos | `"No hay cupo para crear más bases de datos MySQL en este momento."` / `"El servicio de MySQL no pudo completar la operación en este momento."` |
+| `429` | Solo MySQL: se agotó el rate limit **compartido** de la plataforma contra el servicio del socio (no el rate limit por usuario) | `"El servicio de MySQL está recibiendo demasiadas solicitudes en este momento. Espera un par de minutos y vuelve a intentarlo."` |
 | `500` | Falla la creación física en el motor (credenciales admin mal configuradas, motor caído, etc.) — el backend revierte la reserva automáticamente | `"Ocurrió un error al procesar la solicitud."` o `"Ocurrió un error inesperado."` según el tipo de excepción; nunca el detalle interno |
 
 ### 6.2 Listar mis bases de datos
@@ -555,21 +582,21 @@ borró nada, solo revocó la conexión.
 Lo que pasa con la **contraseña** depende del motor, y desde 2026-08-12 ya no
 es igual en los cuatro:
 
-- **SqlServer, Postgres, MySQL:** vuelve la contraseña de siempre. El
-  estudiante se conecta con exactamente las mismas credenciales que ya tenía y
-  no recibe ningún correo. No le ofrezcas resetear la contraseña en este flujo.
-- **Mongo:** se emite una contraseña **nueva** y le llega **por correo**. La
-  base de Mongo se aprovisiona contra la API externa del equipo, que no tiene
-  un "desactivar" propio: desactivar se implementa rotando la credencial y
-  descartándola, así que la anterior es irrecuperable por diseño. Después de
+- **SqlServer, Postgres:** vuelve la contraseña de siempre. El estudiante se
+  conecta con exactamente las mismas credenciales que ya tenía y no recibe
+  ningún correo. No le ofrezcas resetear la contraseña en este flujo.
+- **Mongo y MySQL:** se emite una contraseña **nueva** y le llega **por
+  correo**. Esos dos motores se aprovisionan contra servicios externos que no
+  tienen un "desactivar" propio: desactivar se implementa rotando la credencial
+  y descartándola, así que la anterior es irrecuperable por diseño. Después de
   reactivar, avísale que revise su correo — la respuesta HTTP no trae la
   contraseña (mismo criterio que la sección 6.7).
 
 Es **reintentable sin riesgo**: si la llamada falla a mitad de camino, volver a
-pulsar el botón completa la operación. En los tres motores locales es
-idempotente; en Mongo cada reintento emite otra contraseña e invalida la
-anterior, pero el estado final siempre es "la base es alcanzable con la última
-contraseña enviada".
+pulsar el botón completa la operación. En SqlServer y Postgres es idempotente;
+en Mongo y MySQL cada reintento emite otra contraseña e invalida la anterior,
+pero el estado final siempre es "la base es alcanzable con la última contraseña
+enviada".
 
 **Respuesta `200 OK`:** el mismo shape que la sección 6.3, con
 `"status": "Active"` y `pausedAt` en `null`.
@@ -580,14 +607,21 @@ contraseña enviada".
 | `401` | Falta el token, es inválido o expiró | — |
 | `404` | El `id` no existe o no es del usuario | `"Base de datos no encontrada."` |
 | `400` | La BD no está `Inactive` (sigue activa, o ya fue eliminada) | `"Solo se puede reactivar una base de datos que esté inactiva."` |
-| `409` | Solo Mongo: la BD se creó antes de la migración a la API externa y no tiene identificador ahí | `"La base de datos '<nombre>' no tiene un identificador en la API de MongoDB..."` |
-| `502` | Solo Mongo: la API externa de aprovisionamiento falló o rechazó nuestras credenciales | `"El servicio de MongoDB respondió con un error (...)"` |
+| `409` | Mongo/MySQL: la BD se creó antes de la migración a la API externa y no tiene identificador ahí | `"La base de datos '<nombre>' no tiene un identificador en la API de ..."` |
+| `404` | Solo MySQL: el servicio del socio pausó la base por superar su cuota de espacio, así que no acepta rotar credenciales | `"...Puede que el servicio la haya pausado por superar su cuota de espacio: libera espacio y vuelve a intentarlo en unos minutos."` |
+| `502` / `503` / `429` | Mongo/MySQL: la API externa falló, rechazó nuestras credenciales, no tiene cupo, o se agotó su rate limit compartido | ver la tabla de la sección 6.1 |
 | `429` | Más de 5 solicitudes/min de este usuario (comparte el límite con `POST /databases`) | `"Demasiadas solicitudes. Inténtalo más tarde."` |
 
-> Los `502` de Mongo no son culpa del usuario: preséntalos como "el servicio de
-> bases de datos no está disponible, inténtalo en un momento", no como un error
-> de sus datos. Aplican igual a crear, desactivar, reactivar, eliminar y
-> resetear contraseña de ese motor.
+> Los `502`, `503` y `429` de Mongo y MySQL no son culpa del usuario:
+> preséntalos como "el servicio de bases de datos no está disponible, inténtalo
+> en un momento", no como un error de sus datos. Aplican igual a crear,
+> desactivar, reactivar, eliminar y resetear contraseña de esos motores.
+>
+> El `429` merece un matiz: es el rate limit **de la plataforma contra el
+> servicio socio**, compartido entre todos los usuarios, no el rate limit por
+> usuario de `db-provisioning`. El usuario puede recibirlo sin haber hecho nada
+> repetitivo, así que el mensaje debería decir "el servicio está ocupado", no
+> "hiciste demasiadas solicitudes".
 
 > Qué botón mostrar según `status`: con `"Active"` van "Desactivar" y
 > "Eliminar" deshabilitado; con `"Inactive"` van **"Reactivar"** y "Eliminar"

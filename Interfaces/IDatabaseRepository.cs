@@ -107,7 +107,8 @@ public interface IDatabaseRepository
     /// <see cref="UpdateDatabaseSizeAsync"/>.
     /// </summary>
     Task SetDatabaseExternalRefAsync(
-        int databaseId, string externalId, string? externalDbName, CancellationToken ct = default);
+        int databaseId, string externalId, string? externalDbName, string? externalLoginName,
+        int? externalMaxStorageMb, CancellationToken ct = default);
 
     /// <summary>
     /// Lee la referencia externa de una BD del usuario
