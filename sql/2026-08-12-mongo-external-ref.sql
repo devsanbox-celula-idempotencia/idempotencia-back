@@ -1,4 +1,20 @@
 /* ============================================================================
+   ██  SUPERSEDIDO — NO EJECUTAR ESTE ARCHIVO  ██
+   ----------------------------------------------------------------------------
+   Lo reemplaza `2026-08-12-partner-mysql-external-ref.sql`, que es
+   AUTOSUFICIENTE: crea estas mismas dos columnas más las dos que agregó la
+   migración de MySQL, y define los dos SPs en su forma final (5 parámetros).
+
+   Correr ESTE archivo después de aquel es un RETROCESO: su
+   `CREATE OR ALTER PROCEDURE sp_SetDatabaseExternalRef` vuelve a dejar el SP en
+   3 parámetros, y el backend —que manda 5— falla con
+   "Procedure or function sp_SetDatabaseExternalRef has too many arguments
+   specified" en cada creación de base MySQL. Ya pasó una vez; de ahí este
+   letrero.
+
+   Se conserva solo como registro histórico de la migración de MongoDB.
+   ============================================================================
+
    Referencia externa de aprovisionamiento — migración de MongoDB a la API del
    equipo (https://mongo.szapatar.dev)
    ----------------------------------------------------------------------------
