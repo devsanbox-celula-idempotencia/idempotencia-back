@@ -1,6 +1,5 @@
 using System.Data;
 using idempotencia.Interfaces;
-using idempotencia.Middleware;
 using idempotencia.Models;
 using idempotencia.Services;
 using Microsoft.Data.SqlClient;
