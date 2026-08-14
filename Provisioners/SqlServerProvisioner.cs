@@ -1,6 +1,5 @@
 using System.Data;
 using idempotencia.Interfaces;
-using idempotencia.Middleware;
 using idempotencia.Models;
 using idempotencia.Services;
 using Microsoft.Data.SqlClient;
@@ -151,25 +150,7 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         // infraestructura del proveedor y su directorio de datos no es asunto
         // nuestro. Un CREATE DATABASE pelado deja que el servidor elija dónde
         // poner los archivos, que es justo lo que queremos.
-        try
-        {
-            await ExecAsync(conn, $"CREATE DATABASE {db};", ct);
-        }
-        catch (SqlException ex) when (ex.Number == 1801)
-        {
-            // 1801 = "Database already exists". En este servidor no es un caso
-            // raro: el proveedor BLOQUEA el DROP por SQL (ver DropAsync), así
-            // que una creación que falló a mitad deja la BD viva y el catálogo
-            // sin registro. El siguiente intento con el mismo nombre choca acá.
-            // El mensaje genérico ("ya existe") no le sirve a nadie: hay que
-            // decir qué hacer.
-            throw new AppException(
-                $"Ya existe una base de datos llamada '{dbName}' en el servidor. " +
-                "Suele ser el residuo de un intento anterior que falló: el proveedor no " +
-                "permite borrar bases por SQL, así que hay que eliminarla desde el panel " +
-                "de Raft antes de reintentar, o crear la base con otro nombre.",
-                StatusCodes.Status409Conflict);
-        }
+        await ExecAsync(conn, $"CREATE DATABASE {db};", ct);
 
         // 1b. La cuota real. MAXSIZE es lo que de verdad frena al estudiante:
         // SQL Server rechaza las escrituras cuando el archivo llega a ese tope,
@@ -183,30 +164,10 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         // No se fija SIZE a propósito: MODIFY FILE no puede REDUCIR el tamaño
         // actual, así que pedir un SIZE igual o menor al que heredó de 'model'
         // haría fallar la creación entera por un dato que no aporta nada.
-        //
-        // FILEGROWTH se acota a la cuota: SQL Server rechaza con el error 5169
-        // ("FILEGROWTH cannot be greater than MAXSIZE") cualquier incremento
-        // mayor que el tope, y tiene razón — un archivo que crece de a 4 MB no
-        // cabe en una cuota de 2 MB. El valor sale del catálogo, así que no se
-        // puede asumir que siempre sea holgado.
-        if (maxStorageMb > 0)
-        {
-            var growthMb = Math.Max(1, Math.Min(4, maxStorageMb));
-
-            await ExecAsync(conn,
-                $"ALTER DATABASE {db} MODIFY FILE " +
-                $"(NAME = {QuoteLiteral(dbName)}, MAXSIZE = {maxStorageMb}MB, FILEGROWTH = {growthMb}MB);",
-                ct);
-        }
-        else
-        {
-            // Cuota no configurada en el catálogo: se deja el crecimiento por
-            // defecto en vez de mandar MAXSIZE = 0MB, que SQL Server rechaza.
-            // La BD queda usable y sin tope — se registra para que se note.
-            _logger.LogWarning(
-                "La BD {Db} se creó SIN cuota de almacenamiento: el catálogo reportó " +
-                "MaxStorageMB = {MaxStorageMb}. Revisar sp_ReserveDatabase.", dbName, maxStorageMb);
-        }
+        await ExecAsync(conn,
+            $"ALTER DATABASE {db} MODIFY FILE " +
+            $"(NAME = {QuoteLiteral(dbName)}, MAXSIZE = {maxStorageMb}MB, FILEGROWTH = 4MB);",
+            ct);
 
         // 2. Login a nivel servidor. QuoteLiteral escapa la contraseña como literal.
         await ExecAsync(conn,
@@ -269,53 +230,14 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         await using var conn = new SqlConnection(_adminConnectionString);
         await conn.OpenAsync(ct);
 
-        // 1. Revocar el acceso PRIMERO. Es lo único que este servidor nos
-        // garantiza poder hacer, y es lo que de verdad protege los datos: sin
-        // login no hay forma de conectarse a la base, exista o no. El orden
-        // importa — si se dejara para el final, un DROP DATABASE bloqueado se
-        // llevaría por delante también la revocación.
+        // Cierra conexiones activas y borra la BD si existe.
+        await ExecAsync(conn,
+            $"IF DB_ID({QuoteLiteral(dbName)}) IS NOT NULL BEGIN " +
+            $"ALTER DATABASE {db} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {db}; END", ct);
+
+        // Borra el login si existe.
         await ExecAsync(conn,
             $"IF SUSER_ID({QuoteLiteral(login)}) IS NOT NULL DROP LOGIN {lg};", ct);
-
-        // 2. Borrado físico, que en el servidor del proveedor PUEDE ESTAR
-        // PROHIBIDO. Raft tiene un trigger DDL que cancela cualquier
-        // DROP DATABASE por SQL y responde "utiliza el panel de Raft".
-        //
-        // No se propaga la excepción a propósito: el acceso ya quedó revocado y
-        // el catálogo puede marcar la base como eliminada sin mentir sobre lo
-        // que importa. Propagar dejaría al usuario sin poder cerrar el ciclo de
-        // vida de su base por una restricción que no es suya ni nuestra. Lo que
-        // sí queda es un ERROR en el log con el nombre exacto a purgar.
-        try
-        {
-            await ExecAsync(conn,
-                $"IF DB_ID({QuoteLiteral(dbName)}) IS NOT NULL BEGIN " +
-                $"ALTER DATABASE {db} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {db}; END", ct);
-        }
-        catch (SqlException ex)
-        {
-            _logger.LogError(ex,
-                "No se pudo borrar físicamente la BD {Db}: el servidor rechazó el DROP DATABASE. " +
-                "El login ya fue revocado, así que nadie puede conectarse, pero la base sigue " +
-                "ocupando espacio. Eliminarla desde el panel del proveedor.", dbName);
-
-            // El SET SINGLE_USER de arriba se ejecuta en su propia transacción
-            // implícita, así que el rollback del trigger NO lo deshace: sin esto
-            // la base quedaría aceptando una sola conexión, que es peor que el
-            // estado en el que estaba. Se devuelve a MULTI_USER.
-            try
-            {
-                await ExecAsync(conn,
-                    $"IF DB_ID({QuoteLiteral(dbName)}) IS NOT NULL " +
-                    $"ALTER DATABASE {db} SET MULTI_USER;", ct);
-            }
-            catch (SqlException restoreEx)
-            {
-                _logger.LogError(restoreEx,
-                    "Además, la BD {Db} pudo quedar en SINGLE_USER tras el intento de borrado. " +
-                    "Revisar y ejecutar ALTER DATABASE ... SET MULTI_USER a mano.", dbName);
-            }
-        }
     }
 
     public async Task<CredentialRotationResult?> ChangePasswordAsync(
