@@ -29,6 +29,26 @@ public class ExternalDatabaseRef
     /// </summary>
     public string? ExternalDbName { get; set; }
 
+    /// <summary>
+    /// Usuario real creado por el servicio externo, cuando no coincide con el
+    /// <c>LoginName</c> del catálogo. En Mongo coinciden (ese servicio acepta el
+    /// nombre que se le manda); en la API de la célula socia de MySQL no, porque
+    /// su endpoint de creación no lleva cuerpo y el usuario lo genera ella con su
+    /// propio prefijo.
+    /// </summary>
+    public string? ExternalLoginName { get; set; }
+
+    /// <summary>
+    /// Cuota de almacenamiento que aplica REALMENTE el servicio externo, en MB,
+    /// cuando la fija él y no el catálogo. Se guarda por base —y no se lee de
+    /// configuración cada vez— para que una base creada bajo una cuota siga
+    /// reportando la suya si el socio cambia el límite para las nuevas.
+    ///
+    /// <c>null</c> = manda el <c>MaxStorageMB</c> del catálogo, que es el caso de
+    /// todos los motores locales.
+    /// </summary>
+    public int? ExternalMaxStorageMB { get; set; }
+
     /// <summary>true si esta BD la administra un servicio externo.</summary>
     public bool IsExternal => !string.IsNullOrWhiteSpace(ExternalId);
 }

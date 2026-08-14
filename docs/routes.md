@@ -22,6 +22,18 @@
 > (`dbName` ahora es el nombre físico que genera esa API, y `reactivate` envía
 > un correo con una contraseña nueva) — documentado en `docs/API.md` secciones
 > 6.1 y 6.5, y en `docs/claude.md` sesión 18.
+> Revisión posterior: **2026-08-12 (sesión 19)** — MySQL pasó a aprovisionarse
+> contra la API de la célula socia (`https://api.aba.andrescortes.dev`).
+> **Tampoco cambió ninguna ruta, método, auth ni rate limit.** Sí cambió el
+> contenido de las respuestas de ese motor (`dbName`, `loginName` y
+> `maxStorageMB` los genera/fija el socio) y aparecen códigos `429` y `503`
+> nuevos — documentado en `docs/API.md` secciones 6.1 y 6.5, y en
+> `docs/claude.md` sesión 19.
+> Revisión posterior: **2026-08-14 (sesión 20)** — las bases de SQL Server pasaron
+> a crearse en la instancia de Raft Consensus, con el catálogo intacto en su
+> servidor. **Tampoco cambió ninguna ruta, método, auth ni rate limit**; el único
+> efecto visible es que el `host` que devuelve la API para ese motor ahora es
+> `49.13.85.216` — ver `docs/API.md` sección 6.1 y `docs/claude.md` sesión 20.
 > **Este documento debe actualizarse cada vez que cambien las rutas** (ver nota
 > al final y `CLAUDE.md`).
 

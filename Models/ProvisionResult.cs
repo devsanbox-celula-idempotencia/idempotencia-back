@@ -6,11 +6,12 @@ namespace idempotencia.Models;
 ///
 /// Los campos posteriores a <paramref name="Port"/> son opcionales y existen
 /// para los provisioners que NO controlan la creación: cuando la BD la crea un
-/// servicio externo (ver <see cref="idempotencia.Provisioners.RemoteMongoProvisioner"/>),
+/// servicio externo (ver <see cref="idempotencia.Provisioners.RemoteMongoProvisioner"/>
+/// y <see cref="idempotencia.Provisioners.RemoteMySqlProvisioner"/>),
 /// el nombre físico y la contraseña los decide ese servicio, no el backend, así
 /// que el provisioner tiene que poder devolver lo que realmente quedó creado.
-/// En los cuatro provisioners "clásicos" (motor local, driver nativo) van todos
-/// en <c>null</c>: el backend ya sabe lo que pidió porque él mismo lo generó.
+/// En los provisioners "clásicos" (motor local, driver nativo) van todos en
+/// <c>null</c>: el backend ya sabe lo que pidió porque él mismo lo generó.
 /// </summary>
 /// <param name="Host">Host público al que se conecta el usuario final.</param>
 /// <param name="Port">Puerto público del motor.</param>
@@ -26,11 +27,23 @@ namespace idempotencia.Models;
 /// así que sin esto la cadena de conexión que se le entrega al usuario
 /// apuntaría a una base que no existe.
 /// </param>
+/// <param name="EffectiveLogin">
+/// Usuario REAL creado en el motor, cuando no es el que reservó el catálogo. La
+/// API de la célula socia (MySQL) genera el suyo con su propio prefijo y ni
+/// siquiera acepta una propuesta —su <c>POST</c> no lleva cuerpo—, así que sin
+/// esto el usuario recibiría un login que no existe.
+/// </param>
 /// <param name="EffectivePassword">
 /// Contraseña REAL con la que quedó creado el usuario, cuando no es la que
 /// generó el backend. El servicio externo genera la suya y no acepta una
 /// impuesta; el orquestador guarda el hash de ESTA y es la que entrega al
 /// usuario.
+/// </param>
+/// <param name="ExternalMaxStorageMB">
+/// Cuota de almacenamiento, en MB, que aplica REALMENTE el servicio externo,
+/// cuando la fija él y no el catálogo. La API socia de MySQL pausa la base al
+/// superarla, así que reportar la del catálogo cuando difieren le muestra al
+/// usuario un límite que no existe y su base se bloquea sin explicación.
 /// </param>
 /// <param name="ConnectionUri">
 /// Cadena de conexión tal como la devuelve el servicio externo. Se prefiere
@@ -42,5 +55,7 @@ public record ProvisionResult(
     int Port,
     string? ExternalId = null,
     string? EffectiveDbName = null,
+    string? EffectiveLogin = null,
     string? EffectivePassword = null,
+    int? ExternalMaxStorageMB = null,
     string? ConnectionUri = null);
