@@ -1266,6 +1266,96 @@ acceso es público, ahí va la IP pública del VPS o un dominio.
 
 ---
 
+### 28. Conectarse a la BD MySQL recién creada exigía un paso manual (`allowPublicKeyRetrieval`) y dejaba las credenciales sin cifrar — CORREGIDO
+**Estado:** 🟡 Fix implementado (pendiente compilar, desplegar y ejecutar el backfill de usuarios existentes).
+**Tipo:** Usabilidad + seguridad (credenciales en tránsito).
+**Dónde:** [`Provisioners/MySqlProvisioner.cs`](../Provisioners/MySqlProvisioner.cs)
+(y los otros tres provisioners para las cadenas de conexión),
+`Provisioning:MySql:AdminConnectionString` en `appsettings.json`,
+[`Services/EmailTemplates.cs`](../Services/EmailTemplates.cs),
+[`DTOs/DatabaseDtos.cs`](../DTOs/DatabaseDtos.cs) y
+[`DTOs/AuthDtos.cs`](../DTOs/AuthDtos.cs).
+
+**Problema reportado:** un usuario nuevo con su BD MySQL recién aprovisionada no
+podía conectarse desde su gestor (DBeaver y similares) sin activar a mano la
+opción `allowPublicKeyRetrieval`.
+
+**Causa:** desde MySQL 8 el plugin de autenticación por defecto es
+`caching_sha2_password`. Cuando la conexión **no está cifrada**, ese plugin
+necesita un intercambio de clave pública RSA para no mandar la contraseña en
+claro; el cliente no tiene esa clave, así que falla y sugiere
+`allowPublicKeyRetrieval=true` — que además es peor: le pide al cliente aceptar
+una clave pública sin verificar, lo que habilita un MITM que se quede con la
+contraseña en texto plano (la propia doc del driver lo advierte, y por eso viene
+desactivado). Con la conexión cifrada el problema desaparece: el intercambio
+ocurre dentro del canal TLS.
+
+Nada en el backend estaba forzando ese cifrado:
+
+- El `AdminConnectionString` de MySQL no traía ninguna opción de SSL, así que
+  MySqlConnector usaba su default `SslMode=Preferred` — "cifra si el servidor
+  puede", sin garantía ni aviso si no.
+- El backend **no le entregaba ninguna cadena de conexión al usuario**: la API y
+  el correo daban host, puerto, usuario y contraseña por separado, así que cada
+  usuario armaba la conexión en su cliente y ahí decidía (o no) el cifrado.
+- Los usuarios se creaban sin `REQUIRE SSL`, con lo cual el motor aceptaba
+  conexiones sin cifrar. Con el puerto expuesto públicamente, eso significa
+  credenciales de BD viajando en texto plano por internet.
+
+> **Nota sobre el diagnóstico inicial:** se planteó como "reemplazar
+> `useSSL=true` por `sslMode=REQUIRED`". `useSSL` es un parámetro de
+> **Connector/J**, el driver Java (el que usa DBeaver), donde efectivamente está
+> deprecado. Este backend usa **MySqlConnector** (.NET), donde la opción se llama
+> `SslMode` y `useSSL` no existiría; y de hecho `useSSL` no aparecía en ningún
+> archivo del repo. El fondo del diagnóstico igual era correcto: faltaba forzar
+> el cifrado. La diferencia práctica es que no había un parámetro que corregir,
+> había uno que agregar en dos lugares distintos.
+
+**Solución aplicada:**
+
+1. **Conexión propia del backend:** `SslMode=Required` en
+   `Provisioning:MySql:AdminConnectionString`. En MySqlConnector, `Required`
+   cifra pero **no** valida el certificado (solo `VerifyCA`/`VerifyFull` lo
+   validan), que es exactamente lo que hace falta con un certificado
+   autofirmado.
+2. **Cadenas de conexión para el usuario (nuevas):** `BuildClientConnection` en
+   [`Interfaces/IDatabaseProvisioner.cs`](../Interfaces/IDatabaseProvisioner.cs)
+   y los cuatro provisioners, devolviendo
+   [`Models/ClientConnectionInfo.cs`](../Models/ClientConnectionInfo.cs) →
+   campos `connectionUri` (formato nativo, con credenciales) y `jdbcUrl` (para
+   clientes Java, sin credenciales) en `POST /databases`, en el
+   `mySqlDatabase` del login y en los **dos correos** de credenciales. Cada
+   motor escribe el parámetro de cifrado a su manera
+   (`ssl-mode=REQUIRED` / `sslMode=REQUIRED` / `sslmode=require` /
+   `tls=true` / `Encrypt=True`), que es justo lo que no se le puede pedir al
+   usuario que adivine. Usuario y contraseña van percent-encoded: el alfabeto de
+   `PasswordGenerator` incluye `#$%&*+-`, que romperían la URI en crudo.
+3. **`CREATE USER ... REQUIRE SSL`** en MySQL: el motor **rechaza** conexiones
+   sin cifrar de los usuarios aprovisionados. Es la única mitad que el cliente
+   no puede eludir — el `ssl-mode` de la cadena es un pedido, no una garantía.
+4. **Flag `Provisioning:{Engine}:RequireTls`** para gobernar los puntos 2 y 3.
+   Está en `true` para MySQL (TLS confirmado funcionando) y SqlServer (cifra
+   siempre, y el admin ya usaba `Encrypt=True`), y en `false` para Postgres y
+   Mongo: sus imágenes oficiales no habilitan TLS por defecto, y exigirlo contra
+   un motor sin certificado **dejaría a esos usuarios sin poder conectarse**.
+   Cuando esos contenedores tengan certificado, se prende el flag y no hace
+   falta tocar código.
+
+**Pendiente:**
+
+- Compilar y desplegar.
+- Ejecutar [`sql/2026-07-30-mysql-require-ssl.sql`](../sql/2026-07-30-mysql-require-ssl.sql)
+  **en el motor MySQL** (no en el catálogo de SQL Server) para aplicar
+  `REQUIRE SSL` a los usuarios creados antes de este cambio — los nuevos ya
+  salen así. El script verifica primero, genera los `ALTER` para revisarlos y
+  documenta cómo revertir.
+- Habilitar TLS en los contenedores de Postgres y Mongo y prender su
+  `RequireTls`. Mientras siga en `false`, esas credenciales viajan sin cifrar
+  por el puerto público: **el punto de seguridad queda cerrado solo para MySQL y
+  SqlServer**.
+
+---
+
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
@@ -1301,4 +1391,5 @@ acceso es público, ahí va la IP pública del VPS o un dominio.
 | 24 | `POST /databases/{id}/deactivate` siempre falla: `sp_DeactivateDatabase` escribe `'Inactive'` y `CK_ProvDb_Status` solo permite `'Paused'` (error 547) | 🔴 Alta (funcionalidad rota + catálogo desincronizado) | 🔴 Abierto (fix es un `ALTER TABLE`, ver ítem 24) |
 | 25 | `currentSizeMB` nunca se actualizaba: ningún SP lo escribía y no había job que midiera | 🟠 Media (dato falso expuesto en la API, en los 4 motores) | 🟡 Fix implementado (`DatabaseSizeMonitor` + 2 SPs); falta ejecutar el script SQL, compilar y desplegar |
 | 26 | Desactivar era un camino sin retorno: faltaba `POST /databases/{id}/reactivate` pese a que los datos nunca se borran | 🟠 Media (pérdida de acceso evitable por un clic del usuario) | 🟡 Implementado (`sp_ReactivateDatabase` + endpoint); falta ejecutar el script SQL, compilar y desplegar |
-| 27 | El `host` entregado al usuario salía de `Provisioning:{Engine}:Host` (en Docker, el nombre del contenedor) y caía a `localhost` en silencio si faltaba | 🔴 Alta (credenciales inservibles desde fuera del servidor, sin señal de error) | 🟡 Implementado (`Provisioning:IpVps` + validación al arrancar); falta setear la clave por ambiente, compilar y desplegar |
+| 27 | El `host` entregado al usuario salía de `Provisioning:{Engine}:Host` (en Docker, el nombre del contenedor) y caía a `localhost` en silencio si faltaba | 🔴 Alta (credenciales inservibles desde fuera del servidor, sin señal de error) | 🟢 Resuelto en código + config (`Provisioning:IpVps` + validación al arrancar); falta compilar y desplegar |
+| 28 | Conectarse a MySQL exigía activar `allowPublicKeyRetrieval` a mano, y las credenciales podían viajar sin cifrar por el puerto público | 🔴 Alta (seguridad) + 🟠 Media (usabilidad) | 🟡 Implementado (`SslMode=Required`, `REQUIRE SSL`, `connectionUri`/`jdbcUrl`); falta compilar, desplegar y correr el backfill. Postgres/Mongo siguen sin TLS |

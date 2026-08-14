@@ -36,6 +36,7 @@ se documentan aquí por ese mismo motivo.
 | `Authentication:GitHub:ClientId` / `ClientSecret` | Credenciales de la app OAuth de GitHub |
 | `Provisioning:IpVps` | **Host público** (IP del VPS, o el dominio que apunte a él) que se entrega a los usuarios en el campo `host` para conectarse a sus BDs. Un único valor para los cuatro motores. El backend **lanza un error al arrancar** si falta, en vez de reportar `localhost` en silencio |
 | `Provisioning:{Engine}:Port` / `AdminConnectionString` | Puerto público de cada motor y cadena de conexión con privilegios de administrador que usa el backend para aprovisionar. `AdminConnectionString` es la ruta **interna** al motor (en Docker, el nombre del contenedor) y por eso no sirve como `host` del usuario — para eso está `Provisioning:IpVps` |
+| `Provisioning:{Engine}:RequireTls` | Si el motor tiene TLS habilitado y se exige. Con `true`: las cadenas de conexión que se le entregan al usuario incluyen el parámetro de cifrado del motor, y en MySQL los usuarios se crean con `REQUIRE SSL` (el motor rechaza conexiones sin cifrar). Hoy `true` en MySQL y SqlServer; `false` en Postgres y Mongo, cuyos contenedores todavía no tienen certificado — **prenderlo contra un motor sin TLS deja a los usuarios sin poder conectarse** |
 | `Provisioning:{Engine}:MaxConcurrentConnections` / `MaxConcurrentConnectionsCap` | Default y tope duro de conexiones concurrentes por BD aprovisionada (MySQL/Postgres) |
 
 ## Ambientes

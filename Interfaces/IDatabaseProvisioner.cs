@@ -31,6 +31,23 @@ public interface IDatabaseProvisioner
     int Port { get; }
 
     /// <summary>
+    /// Arma las cadenas de conexión que se le entregan al usuario final (en la
+    /// respuesta de creación y en el correo de credenciales), con el parámetro
+    /// de TLS propio de cada motor ya incluido cuando
+    /// <c>Provisioning:{Engine}:RequireTls</c> está en <c>true</c>. La sintaxis
+    /// de ese parámetro cambia por motor y por driver
+    /// (<c>ssl-mode=REQUIRED</c> / <c>sslMode=REQUIRED</c> / <c>sslmode=require</c> /
+    /// <c>tls=true</c> / <c>Encrypt=True</c>), que es justo lo que no se le
+    /// puede pedir al usuario que adivine — ver
+    /// <see cref="Models.ClientConnectionInfo"/> y docs/bugs.md ítem 28.
+    ///
+    /// No abre ninguna conexión: es construcción de strings, así que se puede
+    /// llamar también para una BD ya existente (por ejemplo al resetear la
+    /// contraseña, con la contraseña nueva).
+    /// </summary>
+    ClientConnectionInfo BuildClientConnection(string dbName, string login, string password);
+
+    /// <summary>
     /// Crea físicamente la BD + usuario con permisos en el motor.
     /// <paramref name="maxConcurrentConnections"/> ya viene resuelto (default
     /// aplicado si el cliente no pidió uno, acotado al cap del motor) —
@@ -40,12 +57,32 @@ public interface IDatabaseProvisioner
         string dbName, string login, string password, int maxStorageMb,
         int maxConcurrentConnections, CancellationToken ct = default);
 
+    // -----------------------------------------------------------------------
+    // Dos convenciones compartidas por los cuatro métodos de ciclo de vida que
+    // vienen a continuación. Van como comentario y no como <summary> porque no
+    // documentan un miembro concreto, sino el contrato entre todos ellos.
+    //
+    // externalId (Drop/ChangePassword/Deactivate/Reactivate): identificador con
+    // el que un servicio EXTERNO de aprovisionamiento conoce la BD. Los
+    // provisioners locales direccionan por nombre (DROP DATABASE x) y lo
+    // ignoran; uno que delega en una API ajena no puede, porque esa API expone
+    // sus recursos por id —no por nombre— y el nombre físico que ella genera ni
+    // siquiera coincide con el que reservó el catálogo. Llega desde el catálogo
+    // (sp_GetDatabaseExternalRef) y es null para toda base local.
+    //
+    // Retorno de las rotaciones de credencial: ChangePasswordAsync y
+    // ReactivateAsync devuelven un CredentialRotationResult cuando la contraseña
+    // que quedó vigente NO es la que se les pasó —caso de las APIs que generan
+    // la suya— y null cuando sí aplicaron la recibida. El orquestador guarda el
+    // hash y notifica al usuario en función de eso.
+    // -----------------------------------------------------------------------
+
     /// <summary>
     /// Elimina la BD + usuario. Usado tanto para revertir un aprovisionamiento
     /// fallido como para el borrado real de <c>DELETE /databases/{id}</c>
     /// (solo llamado ahí cuando la BD ya está Inactive) — es irreversible.
     /// </summary>
-    Task DropAsync(string dbName, string login, CancellationToken ct = default);
+    Task DropAsync(string dbName, string login, string? externalId, CancellationToken ct = default);
 
     /// <summary>
     /// Cambia la contraseña del login/usuario físico sin tocar los datos ni
@@ -55,7 +92,9 @@ public interface IDatabaseProvisioner
     /// ahí el usuario está scoped a una BD concreta, no es un identificador a
     /// nivel de servidor como en los otros 3 motores.
     /// </summary>
-    Task ChangePasswordAsync(string dbName, string login, string newPassword, CancellationToken ct = default);
+    Task<CredentialRotationResult?> ChangePasswordAsync(
+        string dbName, string login, string newPassword, string? externalId,
+        CancellationToken ct = default);
 
     /// <summary>
     /// Revoca la capacidad de conexión del login/usuario SIN borrar la BD ni
@@ -65,7 +104,7 @@ public interface IDatabaseProvisioner
     /// de poder eliminar la BD. Ver nota de <paramref name="dbName"/> en
     /// <see cref="ChangePasswordAsync"/>.
     /// </summary>
-    Task DeactivateAsync(string dbName, string login, CancellationToken ct = default);
+    Task DeactivateAsync(string dbName, string login, string? externalId, CancellationToken ct = default);
 
     /// <summary>
     /// Restaura la capacidad de conexión revocada por
@@ -80,7 +119,8 @@ public interface IDatabaseProvisioner
     /// cuatro motores, lo que permite reintentar sin riesgo. Ver nota de
     /// <paramref name="dbName"/> en <see cref="ChangePasswordAsync"/>.
     /// </summary>
-    Task ReactivateAsync(string dbName, string login, CancellationToken ct = default);
+    Task<CredentialRotationResult?> ReactivateAsync(
+        string dbName, string login, string? externalId, CancellationToken ct = default);
 
     /// <summary>
     /// Mide el tamaño real que ocupa la BD en el motor, en MB. Es la única
@@ -94,6 +134,13 @@ public interface IDatabaseProvisioner
     /// documenta cuál usa y por qué. Devuelve <c>0</c> si la BD ya no existe en
     /// el motor, en vez de lanzar: para el job una base desaparecida no es un
     /// error que deba abortar el ciclo.
+    ///
+    /// Devuelve un valor NEGATIVO (por convención <c>-1</c>) cuando el motor no
+    /// permite medir en absoluto —el caso de un provisioner que delega en una
+    /// API externa que no expone tamaño por base—. No es lo mismo que <c>0</c>:
+    /// cero afirma "está vacía" y se persistiría, mientras que el negativo dice
+    /// "no lo sé", y el job lo trata como "conserva el último valor conocido" en
+    /// vez de sobrescribir el catálogo con una mentira.
     /// </summary>
     Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default);
 }

@@ -8,15 +8,28 @@ using MongoDB.Driver;
 namespace idempotencia.Provisioners;
 
 /// <summary>
-/// Provisioner de MongoDB. Materializa la base creando una colección inicial y
-/// registra un usuario con rol readWrite sobre ella. La cuota de tamaño no es
-/// nativa por BD, por lo que <paramref name="maxStorageMb"/> no se aplica aquí.
+/// Provisioner de MongoDB contra un servidor Mongo PROPIO, hablado con el driver
+/// nativo: materializa la base creando una colección inicial y registra un
+/// usuario con rol readWrite sobre ella. La cuota de tamaño no es nativa por BD,
+/// por lo que <paramref name="maxStorageMb"/> no se aplica aquí.
+///
+/// <b>Desde 2026-08-12 no es la implementación activa por defecto.</b> El motor
+/// "Mongo" pasó a aprovisionarse contra la API externa del equipo
+/// (<see cref="RemoteMongoProvisioner"/>), que es la que se registra en DI
+/// cuando <c>Provisioning:Mongo:Remote:Enabled</c> está en <c>true</c>. Esta
+/// clase se conserva —y se mantiene compilando— para poder volver atrás
+/// poniendo esa clave en <c>false</c>, sin más cambios que reiniciar: es la
+/// única forma de seguir operando las bases de Mongo creadas ANTES de la
+/// migración, que viven en el servidor propio y no existen en la API externa.
+/// Si algún día ya no queda ninguna, esta clase puede borrarse junto con
+/// <c>Provisioning:Mongo:AdminConnectionString</c>.
 /// </summary>
 public class MongoProvisioner : IDatabaseProvisioner
 {
     private readonly string _adminConnectionString;
     private readonly string _host;
     private readonly int _port;
+    private readonly bool _requireTls;
 
     public string Engine => DatabaseEngine.Mongo;
     public string Host => _host;
@@ -33,6 +46,32 @@ public class MongoProvisioner : IDatabaseProvisioner
         // motores. Program.cs ya validó al arrancar que esté configurada.
         _host = provisioning.Value.IpVps;
         _port = int.TryParse(config["Provisioning:Mongo:Port"], out var p) ? p : 27017;
+
+        // Ver la nota de RequireTls en MySqlProvisioner. En Mongo arranca
+        // apagado por la misma razón que en Postgres: la imagen oficial no trae
+        // TLS habilitado y tls=true contra un servidor sin certificado corta la
+        // conexión del usuario.
+        _requireTls = bool.TryParse(config["Provisioning:Mongo:RequireTls"], out var tls) && tls;
+    }
+
+    /// <inheritdoc />
+    public ClientConnectionInfo BuildClientConnection(string dbName, string login, string password)
+    {
+        // authSource es obligatorio, no un extra: el usuario se crea DENTRO de
+        // su propia BD (no en 'admin'), así que sin este parámetro el cliente
+        // intenta autenticarse contra 'admin' y falla con "Authentication
+        // failed" — un error que parece de credenciales y no lo es.
+        //
+        // tlsInsecure acompaña a tls=true porque el certificado es autofirmado:
+        // sin él, el driver corta por validación de la cadena de confianza.
+        var tls = _requireTls ? "&tls=true&tlsInsecure=true" : string.Empty;
+
+        // Mongo no tiene un driver JDBC estándar (los clientes usan el driver
+        // nativo o mongosh), así que solo se entrega la URI.
+        return new ClientConnectionInfo(
+            $"mongodb://{Uri.EscapeDataString(login)}:{Uri.EscapeDataString(password)}" +
+            $"@{_host}:{_port}/{dbName}?authSource={Uri.EscapeDataString(dbName)}{tls}",
+            null);
     }
 
     public async Task<ProvisionResult> CreateAsync(
@@ -57,7 +96,9 @@ public class MongoProvisioner : IDatabaseProvisioner
         return new ProvisionResult(_host, _port);
     }
 
-    public async Task ChangePasswordAsync(string dbName, string login, string newPassword, CancellationToken ct = default)
+    public async Task<CredentialRotationResult?> ChangePasswordAsync(
+        string dbName, string login, string newPassword, string? externalId,
+        CancellationToken ct = default)
     {
         // updateUser es a nivel de la BD donde vive el usuario (no "admin"),
         // igual que en CreateAsync/DropAsync — Mongo scopea el usuario a una
@@ -70,9 +111,14 @@ public class MongoProvisioner : IDatabaseProvisioner
             { "pwd", newPassword }
         };
         await db.RunCommandAsync<BsonDocument>(updateUser, cancellationToken: ct);
+
+        // Este provisioner SÍ aplica la contraseña que recibe, así que no hay
+        // nada nuevo que devolver: null significa "quedó vigente la que me
+        // pasaste". Ver CredentialRotationResult.
+        return null;
     }
 
-    public async Task DeactivateAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task DeactivateAsync(string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         var db = new MongoClient(_adminConnectionString).GetDatabase(dbName);
 
@@ -87,7 +133,7 @@ public class MongoProvisioner : IDatabaseProvisioner
         await db.RunCommandAsync<BsonDocument>(updateUser, cancellationToken: ct);
     }
 
-    public async Task DropAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task DropAsync(string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         var client = new MongoClient(_adminConnectionString);
         var db = client.GetDatabase(dbName);
@@ -104,7 +150,8 @@ public class MongoProvisioner : IDatabaseProvisioner
         await client.DropDatabaseAsync(dbName, ct);
     }
 
-    public async Task ReactivateAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task<CredentialRotationResult?> ReactivateAsync(
+        string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         var db = new MongoClient(_adminConnectionString).GetDatabase(dbName);
 
@@ -121,6 +168,11 @@ public class MongoProvisioner : IDatabaseProvisioner
             { "roles", new BsonArray { new BsonDocument { { "role", "readWrite" }, { "db", dbName } } } }
         };
         await db.RunCommandAsync<BsonDocument>(updateUser, cancellationToken: ct);
+
+        // Este provisioner SÍ aplica la contraseña que recibe, así que no hay
+        // nada nuevo que devolver: null significa "quedó vigente la que me
+        // pasaste". Ver CredentialRotationResult.
+        return null;
     }
 
     public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)

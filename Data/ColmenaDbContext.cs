@@ -24,6 +24,18 @@ public class ColmenaDbContext : DbContext
     public DbSet<DatabaseReservation> DatabaseReservations => Set<DatabaseReservation>();
     public DbSet<PlatformStatistics> PlatformStatistics => Set<PlatformStatistics>();
 
+    // Referencia de aprovisionamiento externo (sp_GetDatabaseExternalRef). Va
+    // como conjunto propio y no dentro de ProvisionedDatabaseDetail porque lo
+    // devuelve un SP aparte — ver el comentario de ExternalDatabaseRef.
+    public DbSet<ExternalDatabaseRef> ExternalDatabaseRefs => Set<ExternalDatabaseRef>();
+
+    // Conjuntos de resultados de los SPs del catálogo de DNS. Mismo criterio
+    // que los de bases de datos: sin clave, solo lectura.
+    public DbSet<DnsRecordInfo> DnsRecords => Set<DnsRecordInfo>();
+    public DbSet<DnsRecordDetail> DnsRecordDetails => Set<DnsRecordDetail>();
+    public DbSet<DnsRecordReservation> DnsRecordReservations => Set<DnsRecordReservation>();
+    public DbSet<DnsRecordAdminInfo> DnsRecordAdminInfos => Set<DnsRecordAdminInfo>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -68,6 +80,42 @@ public class ColmenaDbContext : DbContext
         });
 
         modelBuilder.Entity<PlatformStatistics>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+        });
+
+        modelBuilder.Entity<ExternalDatabaseRef>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+            // IsExternal es una propiedad calculada sobre ExternalId: no viene
+            // del SP y EF intentaría mapearla a una columna inexistente.
+            e.Ignore(p => p.IsExternal);
+        });
+
+        // DNS: los tres tipos son resultados de SP, igual que los de bases de
+        // datos. No llevan configuración de decimales porque no tienen ninguno
+        // (el TTL es un entero de segundos).
+        modelBuilder.Entity<DnsRecordInfo>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+        });
+
+        modelBuilder.Entity<DnsRecordDetail>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+        });
+
+        modelBuilder.Entity<DnsRecordReservation>(e =>
+        {
+            e.HasNoKey();
+            e.ToView(null);
+        });
+
+        modelBuilder.Entity<DnsRecordAdminInfo>(e =>
         {
             e.HasNoKey();
             e.ToView(null);

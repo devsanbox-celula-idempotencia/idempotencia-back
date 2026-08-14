@@ -18,6 +18,7 @@ public class SqlServerProvisioner : IDatabaseProvisioner
     private readonly string _adminConnectionString;
     private readonly string _host;
     private readonly int _port;
+    private readonly bool _requireTls;
 
     public string Engine => DatabaseEngine.SqlServer;
     public string Host => _host;
@@ -40,6 +41,31 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         // motores. Program.cs ya validó al arrancar que esté configurada.
         _host = provisioning.Value.IpVps;
         _port = int.TryParse(config["Provisioning:SqlServer:Port"], out var p) ? p : 1433;
+
+        // Ver la nota de RequireTls en MySqlProvisioner. En SQL Server arranca
+        // prendido: el motor soporta cifrado siempre (genera un certificado
+        // autofirmado al instalarse) y la propia cadena de administración del
+        // backend ya se conecta con Encrypt=True.
+        _requireTls = bool.TryParse(config["Provisioning:SqlServer:RequireTls"], out var tls) && tls;
+    }
+
+    /// <inheritdoc />
+    public ClientConnectionInfo BuildClientConnection(string dbName, string login, string password)
+    {
+        // SQL Server no usa URIs: su formato nativo es la cadena de keywords de
+        // ADO.NET, que es la que aceptan SSMS y Azure Data Studio (y la misma
+        // que usa el backend). TrustServerCertificate=True acompaña a
+        // Encrypt=True porque el certificado es autofirmado.
+        //
+        // La contraseña se interpola sin comillas a propósito: PasswordGenerator
+        // no emite ';' '"' ''' ni espacios, los únicos caracteres que obligarían
+        // a citar el valor en este formato.
+        var tls = _requireTls ? "Encrypt=True;TrustServerCertificate=True;" : string.Empty;
+        var jdbcTls = _requireTls ? ";encrypt=true;trustServerCertificate=true" : string.Empty;
+
+        return new ClientConnectionInfo(
+            $"Server={_host},{_port};Database={dbName};User Id={login};Password={password};{tls}",
+            $"jdbc:sqlserver://{_host}:{_port};databaseName={dbName}{jdbcTls}");
     }
 
     public async Task<ProvisionResult> CreateAsync(
@@ -83,7 +109,7 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         return new ProvisionResult(_host, _port);
     }
 
-    public async Task DropAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task DropAsync(string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         var db = QuoteIdentifier(dbName);
         var lg = QuoteIdentifier(login);
@@ -101,7 +127,9 @@ public class SqlServerProvisioner : IDatabaseProvisioner
             $"IF SUSER_ID({QuoteLiteral(login)}) IS NOT NULL DROP LOGIN {lg};", ct);
     }
 
-    public async Task ChangePasswordAsync(string dbName, string login, string newPassword, CancellationToken ct = default)
+    public async Task<CredentialRotationResult?> ChangePasswordAsync(
+        string dbName, string login, string newPassword, string? externalId,
+        CancellationToken ct = default)
     {
         var lg = QuoteIdentifier(login);
 
@@ -109,9 +137,14 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         await conn.OpenAsync(ct);
 
         await ExecAsync(conn, $"ALTER LOGIN {lg} WITH PASSWORD = {QuoteLiteral(newPassword)};", ct);
+
+        // Este provisioner SÍ aplica la contraseña que recibe, así que no hay
+        // nada nuevo que devolver: null significa "quedó vigente la que me
+        // pasaste". Ver CredentialRotationResult.
+        return null;
     }
 
-    public async Task DeactivateAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task DeactivateAsync(string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         var lg = QuoteIdentifier(login);
 
@@ -124,7 +157,8 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         await ExecAsync(conn, $"ALTER LOGIN {lg} DISABLE;", ct);
     }
 
-    public async Task ReactivateAsync(string dbName, string login, CancellationToken ct = default)
+    public async Task<CredentialRotationResult?> ReactivateAsync(
+        string dbName, string login, string? externalId, CancellationToken ct = default)
     {
         var lg = QuoteIdentifier(login);
 
@@ -135,6 +169,11 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         // borró ni perdió sus permisos dentro de la BD, así que ENABLE basta
         // para dejarlo como estaba, con la misma contraseña.
         await ExecAsync(conn, $"ALTER LOGIN {lg} ENABLE;", ct);
+
+        // Este provisioner SÍ aplica la contraseña que recibe, así que no hay
+        // nada nuevo que devolver: null significa "quedó vigente la que me
+        // pasaste". Ver CredentialRotationResult.
+        return null;
     }
 
     public async Task<decimal> GetSizeMbAsync(string dbName, CancellationToken ct = default)

@@ -29,6 +29,7 @@ public static class EmailTemplates
             <tr><td style="padding:4px 8px;"><strong>Usuario</strong></td><td style="padding:4px 8px;">{db.LoginName}</td></tr>
             <tr><td style="padding:4px 8px;"><strong>Contraseña</strong></td><td style="padding:4px 8px;"><code>{db.Password}</code></td></tr>
           </table>
+          {ConnectionBlock(db.ConnectionUri, db.JdbcUrl)}
           <p style="color:#b00; font-size: 0.9em;">
             Guarda esta contraseña en un lugar seguro — no se puede volver a
             mostrar ni recuperar después de este correo (solo se guarda su
@@ -44,7 +45,8 @@ public static class EmailTemplates
     /// nueva contraseña viaja fuera del backend — no se devuelve en la
     /// respuesta HTTP a propósito (ver docs/API.md).
     /// </summary>
-    public static string DatabasePasswordReset(ProvisionedDatabaseDetail db, string newPassword) => $"""
+    public static string DatabasePasswordReset(
+        ProvisionedDatabaseDetail db, string newPassword, ClientConnectionInfo conn) => $"""
         <div style="font-family: sans-serif; max-width: 480px; margin: auto;">
           <h2>Se restableció la contraseña de tu base de datos</h2>
           <p>La contraseña de acceso a tu base de datos <strong>{db.DbName}</strong>
@@ -55,6 +57,7 @@ public static class EmailTemplates
             <tr><td style="padding:4px 8px;"><strong>Usuario</strong></td><td style="padding:4px 8px;">{db.LoginName}</td></tr>
             <tr><td style="padding:4px 8px;"><strong>Contraseña nueva</strong></td><td style="padding:4px 8px;"><code>{newPassword}</code></td></tr>
           </table>
+          {ConnectionBlock(conn.Uri, conn.JdbcUrl)}
           <p style="color:#b00; font-size: 0.9em;">
             Guarda esta contraseña en un lugar seguro — no se puede volver a
             mostrar ni recuperar después de este correo (solo se guarda su
@@ -63,4 +66,73 @@ public static class EmailTemplates
           </p>
         </div>
         """;
+
+    /// <summary>
+    /// Correo enviado al REACTIVAR una BD cuyo motor no puede devolver el acceso
+    /// con la contraseña anterior (<c>POST /databases/{id}/reactivate</c>).
+    ///
+    /// Solo aplica hoy a MongoDB aprovisionado por la API externa del equipo:
+    /// esa API no tiene "desactivar", así que desactivar se emula rotando la
+    /// credencial y descartando la nueva —nadie la conoce, la base queda
+    /// inalcanzable, los datos intactos—. Reactivar tiene entonces que emitir
+    /// una contraseña nueva, y este es el único canal por el que viaja, igual
+    /// criterio que el reset (nunca en la respuesta HTTP).
+    ///
+    /// En los otros tres motores reactivar NO manda correo: allá la contraseña
+    /// de siempre vuelve a funcionar tal cual.
+    /// </summary>
+    public static string DatabaseReactivatedCredentials(
+        ProvisionedDatabaseDetail db, string newPassword, ClientConnectionInfo conn) => $"""
+        <div style="font-family: sans-serif; max-width: 480px; margin: auto;">
+          <h2>Tu base de datos volvió a estar activa</h2>
+          <p>Reactivamos tu base de datos <strong>{db.DbName}</strong>
+          ({db.Engine}). Tus datos siguen intactos, pero por cómo funciona este
+          motor la contraseña anterior dejó de servir al desactivarla, así que
+          te emitimos una nueva:</p>
+          <table style="border-collapse: collapse; width: 100%;">
+            <tr><td style="padding:4px 8px;"><strong>Motor</strong></td><td style="padding:4px 8px;">{db.Engine}</td></tr>
+            <tr><td style="padding:4px 8px;"><strong>Base de datos</strong></td><td style="padding:4px 8px;">{db.DbName}</td></tr>
+            <tr><td style="padding:4px 8px;"><strong>Usuario</strong></td><td style="padding:4px 8px;">{db.LoginName}</td></tr>
+            <tr><td style="padding:4px 8px;"><strong>Contraseña nueva</strong></td><td style="padding:4px 8px;"><code>{newPassword}</code></td></tr>
+          </table>
+          {ConnectionBlock(conn.Uri, conn.JdbcUrl)}
+          <p style="color:#b00; font-size: 0.9em;">
+            Guarda esta contraseña en un lugar seguro — no se puede volver a
+            mostrar ni recuperar después de este correo (solo se guarda su
+            hash). Si la pierdes, puedes generar otra desde la app
+            (restablecer contraseña de la base de datos).
+          </p>
+        </div>
+        """;
+
+    /// <summary>
+    /// Bloque de cadenas de conexión listas para pegar, compartido por los dos
+    /// correos de credenciales. Existe para que el usuario no tenga que armar la cadena ni
+    /// deducir cómo se escribe el parámetro de TLS en su cliente: en MySQL, sin
+    /// TLS, el cliente le pide activar <c>allowPublicKeyRetrieval</c> a mano
+    /// (ver docs/bugs.md ítem 28) — con la cadena de acá no hace falta.
+    ///
+    /// La URL JDBC se omite cuando no aplica (MongoDB no tiene driver JDBC
+    /// estándar), en vez de mostrar una fila vacía.
+    /// </summary>
+    private static string ConnectionBlock(string uri, string? jdbcUrl)
+    {
+        var jdbcRow = string.IsNullOrWhiteSpace(jdbcUrl)
+            ? string.Empty
+            : $"""
+              <p style="margin:8px 0 2px;"><strong>URL JDBC</strong> (DBeaver, Workbench, DataGrip —
+              "conectar por URL"; el usuario y la contraseña van en sus campos aparte):</p>
+              <code style="display:block; padding:8px; background:#f4f4f4; word-break:break-all;">{jdbcUrl}</code>
+              """;
+
+        return $"""
+            <p style="margin:16px 0 2px;"><strong>Cadena de conexión</strong> (incluye tus credenciales):</p>
+            <code style="display:block; padding:8px; background:#f4f4f4; word-break:break-all;">{uri}</code>
+            {jdbcRow}
+            <p style="font-size: 0.9em; color:#555;">
+              Estas cadenas ya traen el cifrado configurado — pégalas tal cual y
+              conéctate, no hace falta activar ninguna opción extra en tu cliente.
+            </p>
+            """;
+    }
 }
