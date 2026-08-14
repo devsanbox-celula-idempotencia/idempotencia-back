@@ -1412,6 +1412,47 @@ vez estuvo en un registro accesible.
 
 ---
 
+### 30. `CREATE DATABASE` de SQL Server fallaba con "File option FILENAME is required" en el servidor del proveedor — CORREGIDO
+**Estado:** 🟡 Fix implementado (pendiente confirmar en vivo).
+**Tipo:** Bug funcional (aprovisionamiento roto para un motor completo).
+**Dónde:** [`Provisioners/SqlServerProvisioner.cs`](../Provisioners/SqlServerProvisioner.cs) — `CreateAsync`, paso 1.
+**Problema:** el provisioner creaba la BD con la cuota en la misma sentencia:
+
+```sql
+CREATE DATABASE [x] ON PRIMARY (NAME = 'x_data', SIZE = 8MB, MAXSIZE = 20MB, FILEGROWTH = 4MB);
+```
+
+En cuanto se escribe un `<filespec>` —el paréntesis con `NAME`/`SIZE`/etc.— SQL
+Server exige también `FILENAME`, la ruta física del archivo, y si falta responde
+con el error 1036. El resultado: **ninguna base de SQL Server se podía crear**,
+y el fallo aparecía recién al intentarlo contra la instancia de Raft Consensus
+(sesión 20), porque hasta entonces ese motor no se había ejercitado en serio.
+
+No es un problema exclusivo del servidor del proveedor: la sentencia habría
+fallado igual en el servidor propio. Lo que cambió fue que empezó a usarse.
+
+**Por qué no se puede simplemente agregar FILENAME:** haría falta la ruta del
+directorio de datos del motor, que vive en la infraestructura del proveedor y
+puede cambiar sin avisarnos. Escribirla en el código sería acoplarnos a un
+detalle que no controlamos.
+
+**Solución aplicada:** partir en dos statements — un `CREATE DATABASE [x];`
+pelado, que deja al servidor elegir dónde poner los archivos, y después un
+`ALTER DATABASE [x] MODIFY FILE (NAME = 'x', MAXSIZE = ..., FILEGROWTH = 4MB)`
+que aplica la cuota. El nombre lógico del archivo de datos tras un
+`CREATE DATABASE` sin filespec es siempre el nombre de la base.
+
+Se dejó de fijar `SIZE` deliberadamente: `MODIFY FILE` no puede reducir el
+tamaño actual, así que pedir un valor igual o menor al heredado de `model`
+haría fallar la creación entera por un dato que no aportaba nada — el tamaño
+inicial lo define `model` y la cuota la impone `MAXSIZE`.
+
+**Nota sobre el log:** solo se acota el archivo de datos. El de transacciones
+(`<base>_log`) se deja crecer: limitarlo puede dejar la BD en solo lectura por
+una transacción larga, que es un modo de falla peor que el espacio que ocupa.
+
+---
+
 ## Resumen por severidad
 
 > Convención de estado: 🔴 Abierto · 🟡 Fix entregado, sin confirmar · 🟢
@@ -1450,3 +1491,4 @@ vez estuvo en un registro accesible.
 | 27 | El `host` entregado al usuario salía de `Provisioning:{Engine}:Host` (en Docker, el nombre del contenedor) y caía a `localhost` en silencio si faltaba | 🔴 Alta (credenciales inservibles desde fuera del servidor, sin señal de error) | 🟢 Resuelto en código + config (`Provisioning:IpVps` + validación al arrancar); falta compilar y desplegar |
 | 28 | Conectarse a MySQL exigía activar `allowPublicKeyRetrieval` a mano, y las credenciales podían viajar sin cifrar por el puerto público | 🔴 Alta (seguridad) + 🟠 Media (usabilidad) | 🟡 Implementado (`SslMode=Required`, `REQUIRE SSL`, `connectionUri`/`jdbcUrl`); falta compilar, desplegar y correr el backfill. Postgres/Mongo siguen sin TLS |
 | 29 | Todos los secretos (JWT, `sa`, Cloudflare, Gmail, las 2 API keys, OAuth) quedan dentro de la imagen Docker: `.dockerignore` no excluye `appsettings.json` | 🔴 Alta (seguridad) | 🔴 Abierto — el fix rompe el despliegue actual hasta que los secretos salgan del archivo (decisión: se quedan por ahora, sesión 21) |
+| 30 | `CREATE DATABASE ... ON PRIMARY (...)` sin `FILENAME` → error 1036: ninguna base de SQL Server se podía crear | 🔴 Alta (motor completo inutilizable) | 🟡 Corregido (CREATE + ALTER MODIFY FILE); falta confirmar en vivo |

@@ -140,10 +140,33 @@ public class SqlServerProvisioner : IDatabaseProvisioner
         await using var conn = new SqlConnection(_adminConnectionString);
         await conn.OpenAsync(ct);
 
-        // 1. Crear la BD con MAXSIZE = cuota real (SQL Server impide crecer más).
+        // 1. Crear la BD, y recién después aplicarle la cuota.
+        //
+        // Va en DOS statements y no en uno solo con la cláusula ON PRIMARY (...)
+        // porque esa forma exige FILENAME: en cuanto se escribe un <filespec>,
+        // SQL Server pide la ruta física del archivo y falla con el error 1036
+        // ("File option FILENAME is required in this CREATE/ALTER DATABASE
+        // statement"). Y esa ruta no la podemos escribir: el motor vive en la
+        // infraestructura del proveedor y su directorio de datos no es asunto
+        // nuestro. Un CREATE DATABASE pelado deja que el servidor elija dónde
+        // poner los archivos, que es justo lo que queremos.
+        await ExecAsync(conn, $"CREATE DATABASE {db};", ct);
+
+        // 1b. La cuota real. MAXSIZE es lo que de verdad frena al estudiante:
+        // SQL Server rechaza las escrituras cuando el archivo llega a ese tope,
+        // en vez de dejarlo crecer y comerse el disco compartido.
+        //
+        // NAME es el nombre LÓGICO del archivo de datos, que tras un
+        // CREATE DATABASE sin filespec es siempre el nombre de la base (el log
+        // queda como '<base>_log', y no se toca: crece poco y limitarlo puede
+        // dejar la BD en solo lectura por una transacción larga).
+        //
+        // No se fija SIZE a propósito: MODIFY FILE no puede REDUCIR el tamaño
+        // actual, así que pedir un SIZE igual o menor al que heredó de 'model'
+        // haría fallar la creación entera por un dato que no aporta nada.
         await ExecAsync(conn,
-            $"CREATE DATABASE {db} ON PRIMARY " +
-            $"(NAME = {QuoteLiteral(dbName + "_data")}, SIZE = 8MB, MAXSIZE = {maxStorageMb}MB, FILEGROWTH = 4MB);",
+            $"ALTER DATABASE {db} MODIFY FILE " +
+            $"(NAME = {QuoteLiteral(dbName)}, MAXSIZE = {maxStorageMb}MB, FILEGROWTH = 4MB);",
             ct);
 
         // 2. Login a nivel servidor. QuoteLiteral escapa la contraseña como literal.
