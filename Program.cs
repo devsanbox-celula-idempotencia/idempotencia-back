@@ -218,7 +218,17 @@ builder.Services.AddScoped<IDatabaseProvisioner, PostgresProvisioner>();
 // bases de todos los usuarios nuevos.
 if (remoteMySql.Enabled)
 {
-    builder.Services.AddHttpClient<IDatabaseProvisioner, RemoteMySqlProvisioner>((sp, client) =>
+    // OJO con el tipo genérico: va la clase CONCRETA, no IDatabaseProvisioner.
+    // AddHttpClient<TClient, TImpl> nombra el cliente lógico según TClient, así
+    // que registrar los dos provisioners remotos como
+    // AddHttpClient<IDatabaseProvisioner, ...> les daba a ambos el mismo nombre
+    // ("IDatabaseProvisioner") y la última configuración pisaba a la anterior:
+    // el provisioner de MySQL terminaba con el BaseAddress y la cabecera de
+    // Mongo, y le pedía /partners/databases a mongo.szapatar.dev (404). Con la
+    // clase concreta cada uno tiene su propio nombre —y sus propios logs de
+    // HttpClient— y la línea de abajo lo expone como IDatabaseProvisioner para
+    // que el factory lo siga encontrando.
+    builder.Services.AddHttpClient<RemoteMySqlProvisioner>((sp, client) =>
     {
         var settings = sp.GetRequiredService<IOptions<RemoteMySqlSettings>>().Value;
 
@@ -239,6 +249,9 @@ if (remoteMySql.Enabled)
 
         client.Timeout = TimeSpan.FromSeconds(settings.RequestTimeoutSeconds);
     });
+
+    builder.Services.AddScoped<IDatabaseProvisioner>(
+        sp => sp.GetRequiredService<RemoteMySqlProvisioner>());
 }
 else
 {
@@ -258,7 +271,8 @@ if (remoteMongo.Enabled)
     // HttpClient tipado por la misma razón que el proveedor de DNS: handler
     // compartido y reciclado, sin agotar sockets ni quedarse pegado a una IP
     // vieja. La cabecera de autenticación se pone acá una sola vez.
-    builder.Services.AddHttpClient<IDatabaseProvisioner, RemoteMongoProvisioner>((sp, client) =>
+    // Ver la nota del bloque de MySQL: clase concreta, no la interfaz.
+    builder.Services.AddHttpClient<RemoteMongoProvisioner>((sp, client) =>
     {
         var settings = sp.GetRequiredService<IOptions<RemoteMongoSettings>>().Value;
 
@@ -277,6 +291,9 @@ if (remoteMongo.Enabled)
         // dejar la petición colgada hasta el timeout por defecto de 100 segundos.
         client.Timeout = TimeSpan.FromSeconds(settings.RequestTimeoutSeconds);
     });
+
+    builder.Services.AddScoped<IDatabaseProvisioner>(
+        sp => sp.GetRequiredService<RemoteMongoProvisioner>());
 }
 else
 {
